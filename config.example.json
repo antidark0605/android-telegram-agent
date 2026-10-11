@@ -1,0 +1,12 @@
+{
+  "bot_token": "YOUR_BOT_TOKEN",
+  "allowed_pairs": [
+    {
+      "user_id": "YOUR_USER_ID",
+      "chat_id": "YOUR_CHAT_ID"
+    }
+  ],
+  "agy_command": "agy",
+  "workspace": "YOUR_PRIVATE_WORKSPACE_PATH",
+  "task_timeout_seconds": 120
+}
