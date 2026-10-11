@@ -39,14 +39,15 @@ def _integer(value: object, field: str, *, minimum: int, maximum: int) -> int:
 
 
 def load_settings(filename: str | Path) -> Settings:
-    path = Path(filename).expanduser().resolve()
+    candidate_path = Path(filename).expanduser()
+    if candidate_path.is_symlink():
+        raise ConfigError("configuration must not be a symbolic link")
+    path = candidate_path.resolve()
     project_dir = Path(__file__).resolve().parent
     if path.is_relative_to(project_dir):
         raise ConfigError("runtime configuration must be outside the source checkout")
     if not path.is_file():
         raise ConfigError("configuration file not found")
-    if path.is_symlink():
-        raise ConfigError("configuration must not be a symbolic link")
     info = path.stat()
     if info.st_uid != os.getuid() or info.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
         raise ConfigError("configuration must be owned by this user and chmod 600")

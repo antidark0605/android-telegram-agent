@@ -13,7 +13,7 @@ Telegram text → dedicated Bot (long polling) → on-demand official `agy` subp
 - One AGY task at a time; `/cancel` stops its process group.
 - Allowlist both Telegram **user_id and chat_id** before running anything.
 - Private runtime config and update offset outside the source checkout.
-- AGY runs in a dedicated sandbox directory. Does not bypass its own tool-approval rules.
+- AGY uses a dedicated working directory. This is **not** a filesystem sandbox; Termux processes may still access other files allowed by their Android UID. The Bot does not bypass AGY tool-approval rules.
 - No incoming Telegram photo/voice/file handling, no arbitrary shell commands.
 
 ### Commands
@@ -94,6 +94,7 @@ On first start, old queued Telegram messages are discarded to avoid executing st
 - Keep all AGY tool permissions narrowly scoped. Even when a task reports success, a tool action may have been denied: the Bot checks denial metadata and never uses a global permission bypass.
 - Do not select the Termux home directory itself as the workspace, because it may contain AGY login data. Use a small dedicated subdirectory.
 - The Bot does **not** run privileged/root commands. Do not change that without an explicit security review.
+- Working directory separation is for safe defaults, **not** filesystem isolation. Restrict AGY tools and do not store unrelated private files inside the AGY workspace.
 - Stop the running Bot before modifying/upgrading its source. Change runtime secrets in the private file, not the repo.
 - `.gitignore` does not retroactively remove accidentally committed data. Rotate exposed tokens immediately if this ever happens.
 

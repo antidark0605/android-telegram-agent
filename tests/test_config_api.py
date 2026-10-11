@@ -41,6 +41,13 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(c.allowed_pairs, {(101, -202)})
         self.assertEqual(c.task_timeout_seconds, 40)
 
+    def test_symlinked_config_rejected(self):
+        self._write()
+        link = self.conf.parent / "alias.json"
+        link.symlink_to(self.conf)
+        with self.assertRaises(ConfigError):
+            load_settings(link)
+
     def test_world_readable_config_rejected(self):
         self._write()
         self.conf.chmod(0o644)
