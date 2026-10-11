@@ -2,7 +2,7 @@
 
 Lightweight Telegram bridge for AI CLI agents on Android via Termux.
 
-**Current implementation: AGY CLI only.** Other agents are not supported or bundled. Designed for regular (non-root) Termux. Initial CLI/runner validation was performed on an **Android 9 / API 28 / ARM64 commercial device**; the full Telegram round trip and background behavior are **not yet device-verified**. This public project has no device-specific features.
+**Current implementation: AGY CLI only.** Other agents are not supported or bundled. Designed for regular (non-root) Termux. The **text-only Telegram → AGY → Telegram round trip has now been verified** on an **Android 9 / API 28 / ARM64 commercial device**, using a non-root Termux app process and a dedicated test Bot. This verifies the basic path only; cancellation, timeouts, topic-specific replies, prolonged background operation and all child-process cleanup still require real-device validation. This public project has no device-specific features.
 
 ## P0 behavior
 
@@ -25,6 +25,8 @@ Telegram text → dedicated Bot (long polling) → on-demand official `agy` subp
 | `/status` | Shows busy / idle |
 | `/cancel` | Stops the active AGY subprocess |
 | Other commands | Returns an unsupported-command message |
+
+**Topic and conversation isolation:** P0 replies to the same Telegram chat and includes `message_thread_id` when supplied, but this is **reply routing only**, not persistent AGY conversation isolation. Every text prompt currently starts a fresh AGY request. P0 accepts **one Bot token per running process**, configured privately. Future session support can map each authorized chat/topic to its own `conversation_id` via `--conversation`; multiple Bot tokens would require separate configured instances unless explicitly added later. No Topic setup is required to use P0.
 
 **Not part of P0:** `/new`, `/session`, `/model`, `/models`, `/ls`, `/quota`, `/usage`. These will be discussed after an actual Telegram ↔ AGY device round trip succeeds. Session/model/effort behavior differs between CLI agents; the project intentionally has no speculative multi-agent infrastructure.
 
