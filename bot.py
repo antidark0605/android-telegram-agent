@@ -159,6 +159,7 @@ class TelegramAgyBot:
                     busy = self._active is not None
                     if not busy:
                         self._model = None
+                        self._picker = None
                         private_json(self._selected_path, {"model": None})
                 self._reply(chat_id, "Finish the running task first." if busy
                             else "Model reset to AGY default.", thread)
@@ -168,8 +169,10 @@ class TelegramAgyBot:
             # Backward-compatible emergency fallback; main UI uses Stop button.
             with self._lock:
                 task = self._active
-            self._reply(chat_id, "Stop requested." if task and task.runner.cancel()
-                        else "No running task.", thread)
+            owner_task = (task is not None and task.owner == user_id
+                          and task.chat == chat_id and task.thread == thread)
+            self._reply(chat_id, "Stop requested." if owner_task and task.runner.cancel()
+                        else "No running task assigned to this chat.", thread)
         elif text.startswith("/"):
             self._reply(chat_id, "Unknown command. Try /help.", thread)
         elif len(text) > 4000:
