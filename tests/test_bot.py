@@ -163,6 +163,8 @@ class BotTests(unittest.TestCase):
             runner.return_value.run.assert_called_once_with("test", model=options[0][0])
         self.bot.handle_update(make_update("/model default"))
         self.assertIsNone(self.bot._model)
+        self.bot.handle_update(make_callback("model:0", message_id=message_id))
+        self.assertIsNone(self.bot._model)  # Stale picker must remain invalid.
 
     def test_model_picker_refuses_busy_and_stale(self):
         with patch("bot.list_models", return_value=[("gemini-3.8-flash-high", "Gemini")]):
@@ -181,6 +183,19 @@ class BotTests(unittest.TestCase):
             self.bot._active = None
         self.bot.handle_update(make_callback("model:bad", message_id=key_id))
         self.assertIsNone(self.bot._model)
+
+    def test_legacy_cancel_cannot_cross_thread(self):
+        from bot import Task
+        from unittest.mock import MagicMock
+        runner = MagicMock()
+        with self.bot._lock:
+            self.bot._active = Task("task-key", 101, 202, 303, runner, None, 1.0)
+        self.bot.handle_update(make_update("/cancel"))
+        runner.cancel.assert_not_called()
+        self.bot.handle_update(make_update("/cancel", thread=303))
+        runner.cancel.assert_called_once()
+        with self.bot._lock:
+            self.bot._active = None
 
     def test_long_prompt_rejected(self):
         with patch("bot.AgyRunner") as runner:
