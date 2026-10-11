@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from agy import AgyRunner, parse_response
+from agy import AgyRunner, parse_response, parse_models, list_models
 
 
 class AgyParsingTests(unittest.TestCase):
@@ -135,6 +135,46 @@ class RunnerTests(unittest.TestCase):
             result = AgyRunner("agy", Path("/tmp"), 30).run("prompt")
         self.assertFalse(result.ok)
         self.assertNotIn("private path", result.message)
+
+    def test_model_slug_argv_is_passed_to_agy(self):
+        proc = MagicMock()
+        proc.pid = 123456
+        proc.returncode = 0
+        proc.communicate.return_value = ('{"status":"SUCCESS","response":"hi"}', "")
+        with (patch("agy.subprocess.Popen", return_value=proc) as spawn,
+              patch("agy.os.killpg")):
+            result = AgyRunner("agy", Path("/tmp"), 30).run(
+                "question", model="gemini-3.8-flash-high")
+        self.assertTrue(result.ok)
+        self.assertEqual(spawn.call_args.args[0][-2:],
+                         ["--model", "gemini-3.8-flash-high"])
+
+    def test_reject_invalid_model_slug(self):
+        with patch("agy.subprocess.Popen") as spawn:
+            result = AgyRunner("agy", Path("/tmp"), 30).run(
+                "question", model="hello ; private")
+        self.assertFalse(result.ok)
+        spawn.assert_not_called()
+
+    def test_models_parse_only_known_slug_rows(self):
+        sample = ("Models:\\n"
+                  "gemini-3.8-flash-high     Gemini 3.8 Flash (High)\\n"
+                  "claude-sonnet-4-6    Claude Sonnet 4.6 (Thinking)\\n"
+                  "malformed not-a-model\\n").replace("\\n", "\n")
+        models = parse_models(sample)
+        self.assertEqual([row[0] for row in models],
+                         ["gemini-3.8-flash-high", "claude-sonnet-4-6"])
+
+    def test_models_command_no_shell(self):
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = "gemini-3.8-flash-high    Gemini Flash High"
+        with patch("agy.subprocess.run", return_value=mock_proc) as run:
+            options = list_models("agy", Path("/tmp"))
+        self.assertEqual(options[0][0], "gemini-3.8-flash-high")
+        self.assertEqual(run.call_args.args[0], ["agy", "models"])
+        self.assertEqual(run.call_args.kwargs["stdin"],
+                         __import__("subprocess").DEVNULL)
 
     def test_cancel_before_start(self):
         runner = AgyRunner("agy", Path("/tmp"), 30)

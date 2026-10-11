@@ -10,7 +10,7 @@ Telegram text → dedicated Bot (long polling) → on-demand official `agy` subp
 
 - One Python Bot process, **no third-party Python dependencies**.
 - No inbound ports, Linux intermediary, webhook, root, OpenClaw or multi-agent framework.
-- One AGY task at a time; `/cancel` stops its process group.
+- One AGY task at a time. Each task shows a Telegram **running timer and an inline Stop button**; the same status message is updated periodically until the task finishes. `/cancel` remains an unadvertised fallback for earlier users.
 - Allowlist both Telegram **user_id and chat_id** before running anything.
 - Private runtime config and update offset outside the source checkout.
 - AGY uses a dedicated working directory. This is **not** a filesystem sandbox; Termux processes may still access other files allowed by their Android UID. The Bot does not bypass AGY tool-approval rules.
@@ -20,15 +20,25 @@ Telegram text → dedicated Bot (long polling) → on-demand official `agy` subp
 
 | Command | Behavior |
 | --- | --- |
-| Plain text | Starts one **independent** AGY JSON request (no session continuity yet) |
+| Plain text | Starts one **independent** AGY JSON request (no session continuity yet), with an elapsed-time status message |
+| Inline **🛑 Stop** | Stops the active AGY process group from its own status message |
 | `/start`, `/help` | Lists supported actions |
-| `/status` | Shows busy / idle |
-| `/cancel` | Stops the active AGY subprocess |
+| `/status` | Shows busy / idle and selected model |
+| `/models`, `/model` | Queries AGY for available model variants and displays a model-selection keyboard |
+| `/model default` | Clears the override and returns to AGY's default model |
 | Other commands | Returns an unsupported-command message |
 
 **Topic and conversation isolation:** P0 replies to the same Telegram chat and includes `message_thread_id` when supplied, but this is **reply routing only**, not persistent AGY conversation isolation. Every text prompt currently starts a fresh AGY request. P0 accepts **one Bot token per running process**, configured privately. Future session support can map each authorized chat/topic to its own `conversation_id` via `--conversation`; multiple Bot tokens would require separate configured instances unless explicitly added later. No Topic setup is required to use P0.
 
-**Not part of P0:** `/new`, `/session`, `/model`, `/models`, `/ls`, `/quota`, `/usage`. These will be discussed after an actual Telegram ↔ AGY device round trip succeeds. Session/model/effort behavior differs between CLI agents; the project intentionally has no speculative multi-agent infrastructure.
+**Not part of this release:** `/new`, `/session`, `/ls`, `/quota`, `/usage`. Persistent AGY sessions remain a separate future task. Model switching affects **future independent prompts**, not any task already running. Session/model/effort behavior differs between CLI agents; the project intentionally has no speculative multi-agent infrastructure.
+
+### Task status and model buttons
+
+When a prompt starts, the Bot sends a small **⏳ Running · 00:00** status message with an inline **🛑 Stop** button. It edits that same status about every five seconds. Pressing Stop sends a Telegram `callback_query`; the Bot verifies the sender, chat, exact status-message ID and unique task key before stopping the current AGY process group. Stale or unauthorized buttons cannot stop a different task. On completion or failure, the Bot removes the button and reports the final elapsed time; the answer is sent as a normal Telegram reply. There is no requirement to type `/cancel` (the old command is retained only for backward compatibility).
+
+`/models` and `/model` call **`agy models`** from the same authenticated Termux environment, parse the CLI's returned model slugs and show an inline keyboard. The chosen slug is passed as `--model <slug>` on subsequent AGY runs. The selection survives a Bot restart in **`selected-model.json`**, next to the private runtime config, with mode `0600`. Use `/model default` to restore the CLI default. Unknown or unavailable model lists fail closed rather than choosing an undocumented model. The exact menu is determined by the installed AGY version and account, and needs Android end-to-end verification.
+
+The timer is **elapsed wall-clock time**, not a claim about actual AGY progress or percentage completed. To conserve memory and network, the Bot uses a single ticker thread only while a task is active and does not stream model internals. Telegram may delay or reject edits during connectivity problems, so `/status` and the legacy `/cancel` remain usable fallbacks. No third-party Python or UI library is needed.
 
 ## Dependencies and installation
 
@@ -134,11 +144,12 @@ Tests use synthetic messages and mocked AGY processes, with **no real Bot Token,
 1. Non-root Termux: AGY CLI independently answers a simple prompt.
 2. Dedicated Bot receives a fresh Telegram message and returns its **real** AGY result.
 3. Verify unauthorized sender/chat is ignored; no unauthorized AGY child starts.
-4. Repeated messages, busy response, `/cancel`, timeout and network recovery.
+4. Inline Stop button, running timer refresh, busy response, timeout and network recovery. Verify a Stop press during an **active** AGY run, not after completion.
 5. Verify no child processes remain after cancellation/timeout.
 6. Check private config mode `0600`, no tokens in tracked files or logs.
 7. Measure idle/active memory and screen-off resilience on Android 9 / API 28 hardware.
-8. Report sanitized PASS/FAIL only; do not attach real transcripts, OAuth details, logs, device identifiers or internal paths to the public repository.
+8. Verify `/models` returns real model options from the installed AGY, select one, send a new prompt, and verify `--model` was applied. Try stale/unauthorized buttons and `/model default`.
+9. Report sanitized PASS/FAIL only; do not attach real transcripts, OAuth details, logs, device identifiers or internal paths to the public repository.
 
 ## License
 

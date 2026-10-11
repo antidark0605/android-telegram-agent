@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import threading
@@ -104,10 +105,14 @@ class AgyRunner:
             _kill_group(proc)
         return True
 
-    def run(self, prompt: str) -> AgentResult:
+    def run(self, prompt: str, model: str | None = None) -> AgentResult:
         if self._cancelled.is_set():
             return AgentResult(False, "AGY task cancelled.")
         argv = [self.command, "-p", prompt, "--output-format", "json"]
+        if model:
+            if not MODEL_SLUG.fullmatch(model):
+                return AgentResult(False, "Invalid model selector.")
+            argv.extend(["--model", model])
         try:
             proc = subprocess.Popen(
                 argv, cwd=str(self.workspace), stdout=subprocess.PIPE,
@@ -144,3 +149,35 @@ class AgyRunner:
             with self._lock:
                 if self._process is proc:
                     self._process = None
+
+# Only pass a CLI-returned model slug as a single argv element, never a shell.
+MODEL_SLUG = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+){1,8}")
+
+def parse_models(output: str) -> list[tuple[str, str]]:
+    """Extract documented 'agy models' rows: slug + friendly display name.
+
+    Not every CLI build prints the same table decorations; unknown formats
+    deliberately fail closed instead of guessing model IDs.
+    """
+    found: list[tuple[str, str]] = []
+    for line in output.splitlines():
+        clean = re.sub(r"\x1b\[[0-9;]*m", "", line).strip()
+        match = re.match(r"^(?:[-*•]\s*)?([a-z][a-z0-9]*(?:-[a-z0-9]+){1,8})\s{2,}(.+?)\s*$", clean)
+        if match:
+            slug, title = match.groups()
+            if MODEL_SLUG.fullmatch(slug) and slug not in {s for s, _ in found}:
+                found.append((slug, title[:80]))
+    return found[:40]
+
+
+def list_models(command: str, workspace: Path) -> list[tuple[str, str]]:
+    try:
+        proc = subprocess.run([command, "models"], cwd=str(workspace),
+                              stdin=subprocess.DEVNULL, capture_output=True,
+                              text=True, encoding="utf-8", errors="replace",
+                              timeout=12, check=False)
+        if proc.returncode != 0 or len(proc.stdout) > 100_000:
+            return []
+        return parse_models(proc.stdout)
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return []

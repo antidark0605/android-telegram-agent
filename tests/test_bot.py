@@ -14,9 +14,32 @@ from config import Settings
 class DummyAPI:
     def __init__(self):
         self.sent = []
+        self.markups = []
+        self.edited = []
+        self.answered = []
 
-    def send_text(self, chat_id, text, thread_id=None):
+    def send_text(self, chat_id, text, thread_id=None, reply_markup=None):
         self.sent.append((chat_id, text, thread_id))
+        self.markups.append(reply_markup)
+        return len(self.sent)
+
+    def edit_text(self, chat_id, message_id, text, reply_markup=None):
+        self.edited.append((chat_id, message_id, text, reply_markup))
+
+    def answer_callback(self, query_id, text=""):
+        self.answered.append((query_id, text))
+
+
+def make_callback(data, *, message_id, user=101, chat=202):
+    return {
+        "update_id": 11,
+        "callback_query": {
+            "id": "synthetic-callback",
+            "from": {"id": user},
+            "message": {"message_id": message_id, "chat": {"id": chat}},
+            "data": data,
+        },
+    }
 
 
 def make_update(text, user=101, chat=202, thread=None):
@@ -57,7 +80,7 @@ class BotTests(unittest.TestCase):
             worker = self.bot._worker
             if worker is not None:
                 worker.join(2)
-            factory.return_value.run.assert_called_once_with("hello")
+            factory.return_value.run.assert_called_once_with("hello", model=None)
             self.assertIn((202, "model reply", None), self.api.sent)
 
     def test_thread_context_is_preserved(self):
@@ -71,7 +94,7 @@ class BotTests(unittest.TestCase):
 
     def test_busy_and_cancel(self):
         entered, finish = threading.Event(), threading.Event()
-        def slow_run(_text):
+        def slow_run(_text, model=None):
             entered.set()
             finish.wait(3)
             return AgentResult(False, "cancelled")
@@ -89,6 +112,75 @@ class BotTests(unittest.TestCase):
             worker = self.bot._worker
             if worker is not None:
                 worker.join(2)
+
+    def test_inline_stop_button_with_correct_owner_and_message(self):
+        entered, finish = threading.Event(), threading.Event()
+        def slow_run(_text, model=None):
+            entered.set()
+            finish.wait(3)
+            return AgentResult(False, "cancelled")
+        with patch("bot.AgyRunner") as factory:
+            factory.return_value.run.side_effect = slow_run
+            factory.return_value.cancel.return_value = True
+            self.bot.handle_update(make_update("long prompt"))
+            self.assertTrue(entered.wait(2))
+            running = self.api.markups[0]
+            self.assertIn("Stop", running["inline_keyboard"][0][0]["text"])
+            token = running["inline_keyboard"][0][0]["callback_data"]
+            self.bot.handle_update(make_callback(token, message_id=1, user=999))
+            factory.return_value.cancel.assert_not_called()
+            self.bot.handle_update(make_callback(token, message_id=999))
+            factory.return_value.cancel.assert_not_called()
+            self.bot.handle_update(make_callback("stop:old", message_id=1))
+            factory.return_value.cancel.assert_not_called()
+            self.bot.handle_update(make_callback(token, message_id=1))
+            factory.return_value.cancel.assert_called_once()
+            self.assertIn("Stopping", self.api.answered[-1][1])
+            finish.set()
+            worker = self.bot._worker
+            if worker: worker.join(2)
+        self.assertTrue(any(x[3] is None for x in self.api.edited))
+
+    def test_model_picker_and_next_task(self):
+        options = [("gemini-3.8-flash-high", "Gemini 3.8 Flash High"),
+                   ("claude-sonnet-4-6", "Claude Sonnet")]
+        with patch("bot.list_models", return_value=options):
+            self.bot.handle_update(make_update("/models"))
+        markup = self.api.markups[-1]
+        self.assertIn("model:0", str(markup))
+        message_id = len(self.api.sent)
+        self.bot.handle_update(make_callback("model:0", message_id=message_id,
+                                             user=999))
+        self.assertIsNone(self.bot._model)
+        self.bot.handle_update(make_callback("model:0", message_id=message_id))
+        self.assertEqual(self.bot._model, options[0][0])
+        self.assertEqual(self.bot._read_model(), options[0][0])
+        with patch("bot.AgyRunner") as runner:
+            runner.return_value.run.return_value = AgentResult(True, "answer")
+            self.bot.handle_update(make_update("test"))
+            worker = self.bot._worker
+            if worker: worker.join(2)
+            runner.return_value.run.assert_called_once_with("test", model=options[0][0])
+        self.bot.handle_update(make_update("/model default"))
+        self.assertIsNone(self.bot._model)
+
+    def test_model_picker_refuses_busy_and_stale(self):
+        with patch("bot.list_models", return_value=[("gemini-3.8-flash-high", "Gemini")]):
+            self.bot.handle_update(make_update("/model"))
+        key_id = len(self.api.sent)
+        with self.bot._lock:
+            from bot import Task
+            from unittest.mock import MagicMock
+            self.bot._active = Task("faketask", 101, 202, None, MagicMock(),
+                                    None, 1.0)
+        self.bot.handle_update(make_callback("model:0", message_id=key_id))
+        self.assertIsNone(self.bot._model)
+        self.bot.handle_update(make_update("/model default"))
+        self.assertIsNone(self.bot._model)
+        with self.bot._lock:
+            self.bot._active = None
+        self.bot.handle_update(make_callback("model:bad", message_id=key_id))
+        self.assertIsNone(self.bot._model)
 
     def test_long_prompt_rejected(self):
         with patch("bot.AgyRunner") as runner:

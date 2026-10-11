@@ -43,20 +43,41 @@ class TelegramAPI:
 
     def get_updates(self, offset: int, timeout: int = 20) -> list[dict]:
         result = self._call("getUpdates", {
-            "offset": offset, "timeout": timeout, "allowed_updates": ["message"]
+            "offset": offset, "timeout": timeout, "allowed_updates": ["message", "callback_query"]
         }, timeout=timeout + 15)
         if not isinstance(result, list):
             raise TelegramError("Telegram returned an invalid updates list")
         return result
 
-    def send_text(self, chat_id: int, text: str, thread_id: int | None = None) -> None:
-        # sendMessage's text limit is 4096 characters, not bytes.
-        for part in split_text(text):
+    def send_text(self, chat_id: int, text: str, thread_id: int | None = None,
+                  reply_markup: dict | None = None) -> int | None:
+        """Send chunks, attaching buttons only to the first; return first message ID."""
+        first_id = None
+        for index, part in enumerate(split_text(text)):
             data = {"chat_id": chat_id, "text": part,
                     "link_preview_options": {"is_disabled": True}}
             if thread_id is not None:
                 data["message_thread_id"] = thread_id
-            self._call("sendMessage", data, timeout=25)
+            if reply_markup is not None and index == 0:
+                data["reply_markup"] = reply_markup
+            result = self._call("sendMessage", data, timeout=15)
+            if index == 0 and isinstance(result, dict):
+                mid = result.get("message_id")
+                first_id = mid if isinstance(mid, int) else None
+        return first_id
+
+    def edit_text(self, chat_id: int, message_id: int, text: str,
+                  reply_markup: dict | None = None) -> None:
+        self._call("editMessageText", {
+            "chat_id": chat_id, "message_id": message_id,
+            "text": text, "reply_markup": reply_markup or {"inline_keyboard": []},
+        }, timeout=10)
+
+    def answer_callback(self, query_id: str, text: str = "") -> None:
+        self._call("answerCallbackQuery", {
+            "callback_query_id": query_id, "text": text[:180],
+            "show_alert": False,
+        }, timeout=10)
 
 
 def split_text(text: str, limit: int = 3800) -> list[str]:

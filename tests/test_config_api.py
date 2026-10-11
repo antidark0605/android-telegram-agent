@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from config import ConfigError, load_settings
-from telegram_api import split_text
+from telegram_api import TelegramAPI, split_text
 
 
 class ConfigurationTests(unittest.TestCase):
@@ -78,6 +78,29 @@ class MessageTests(unittest.TestCase):
         parts = split_text("臺" * 6000)
         self.assertEqual("".join(parts), "臺" * 6000)
         self.assertTrue(all(len(part) <= 3800 for part in parts))
+
+    def test_allowed_callback_updates(self):
+        api = TelegramAPI("dummy-token")
+        with patch.object(api, "_call", return_value=[]) as call:
+            self.assertEqual(api.get_updates(0), [])
+        self.assertIn("callback_query", call.call_args.args[1]["allowed_updates"])
+
+    def test_send_text_keyboard_and_message_id(self):
+        api = TelegramAPI("dummy-token")
+        markup = {"inline_keyboard": [[{"text": "Stop", "callback_data": "stop:test"}]]}
+        with patch.object(api, "_call", return_value={"message_id": 77}) as call:
+            message_id = api.send_text(1, "testing", 2, reply_markup=markup)
+        self.assertEqual(message_id, 77)
+        self.assertEqual(call.call_args.args[1]["reply_markup"], markup)
+        self.assertEqual(call.call_args.args[1]["message_thread_id"], 2)
+
+    def test_edit_removes_keyboard(self):
+        api = TelegramAPI("dummy-token")
+        with patch.object(api, "_call", return_value=True) as call:
+            api.edit_text(1, 3, "Completed")
+        self.assertEqual(call.call_args.args[0], "editMessageText")
+        self.assertEqual(call.call_args.args[1]["reply_markup"],
+                         {"inline_keyboard": []})
 
     def test_empty_message(self):
         self.assertEqual(split_text(""), ["(empty response)"])
