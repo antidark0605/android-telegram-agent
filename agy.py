@@ -47,31 +47,37 @@ def parse_response(output: str) -> AgentResult:
     result = _result_object(data)
     if result is None:
         return AgentResult(False, "AGY returned an unexpected result object.")
+    # AGY's documented terminal JSON uses "status": "SUCCESS". A response
+    # string alone is not proof that a request succeeded (e.g. CANCELED).
+    statuses = [obj["status"] for obj in (data, result) if "status" in obj]
+    if not statuses or any(
+        not isinstance(status, str) or status.upper() != "SUCCESS"
+        for status in statuses
+    ):
+        return AgentResult(False, "AGY did not report a successful terminal status.")
     for obj in (data, result):
-        status = str(obj.get("status") or obj.get("subtype") or "").lower()
-        if status in ("error", "failed", "failure", "cancelled", "denied"):
-            return AgentResult(False, "AGY reported a failed or rejected request.")
-        if obj.get("error"):
+        if obj.get("error") or obj.get("is_error"):
             return AgentResult(False, "AGY reported an error (details withheld).")
         denied = obj.get("denied_actions") or obj.get("permission_denials")
         if denied:
             return AgentResult(False, "AGY reported denied tool permissions; task not confirmed.")
-    response = result.get("response") or result.get("text")
-    if not isinstance(response, str):
-        candidate = data.get("result")
-        response = candidate if isinstance(candidate, str) else None
+    response = result.get("response")
     if not isinstance(response, str) or not response.strip():
         return AgentResult(False, "AGY completed without a verified model response.")
     return AgentResult(True, response.strip())
 
 
 def _kill_group(proc: subprocess.Popen) -> None:
-    if proc.poll() is not None:
-        return
+    """Stop the session's process group, even after its leader has exited.
+
+    An AGY subprocess can spawn children which remain alive after the CLI
+    leader exits. A completed Popen object does not mean its whole group died.
+    start_new_session=True ensures the child's PID is its process group ID.
+    """
     try:
         os.killpg(proc.pid, signal.SIGKILL)
     except ProcessLookupError:
-        pass
+        pass  # Group is already gone.
     except OSError:
         try:
             proc.kill()
@@ -105,8 +111,8 @@ class AgyRunner:
         try:
             proc = subprocess.Popen(
                 argv, cwd=str(self.workspace), stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, start_new_session=True,
-                text=True, encoding="utf-8", errors="replace",
+                stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                start_new_session=True, text=True, encoding="utf-8", errors="replace",
             )
         except (OSError, ValueError):
             return AgentResult(False, "Cannot start AGY. Check command and Termux installation.")
@@ -132,6 +138,9 @@ class AgyRunner:
                 return AgentResult(False, "AGY JSON output exceeded the size limit.")
             return parse_response(stdout)
         finally:
+            # Clean up children even if AGY itself returned success or exited
+            # before cancellation. This is idempotent if the group is gone.
+            _kill_group(proc)
             with self._lock:
                 if self._process is proc:
                     self._process = None
