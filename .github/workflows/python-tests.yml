@@ -1,0 +1,21 @@
+name: Python tests
+on:
+  push:
+  pull_request:
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Compile
+        run: python -m compileall -q bot.py agy.py config.py telegram_api.py tests
+      - name: Unit tests (no network or credentials)
+        run: python -m unittest discover -s tests -v

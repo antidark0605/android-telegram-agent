@@ -1,60 +1,122 @@
 # android-telegram-agent
 
-Revision 1；2026-10-11。
-
 Lightweight Telegram bridge for AI CLI agents on Android via Termux.
 
-## 狀態
+**Current implementation: AGY CLI only.** Other agents are not supported or bundled. Designed for regular (non-root) Termux, initially validated against an **Android 9 / API 28 / ARM64 commercial device**. This public project has no device-specific features.
 
-目前是專案初始化，尚未提供可執行的 Bot。此提交只有文件、授權、忽略規則與假值設定範例；不含第三方 CLI 或任何帳號憑證。
+## P0 behavior
 
-目標是一般 Android 裝置上的非 root Termux 環境。初始驗證目標為 Android 9／API 28／ARM64；Telegram 完整往返及背景可靠性待實作與驗證。
+Telegram text → dedicated Bot (long polling) → on-demand official `agy` subprocess → verified JSON model response → Telegram reply.
 
-初期僅實作 AGY；其他 CLI 屬未來獨立評估，不在首階段範圍，也不預建多工具路由或插件框架。
+- One Python Bot process, **no third-party Python dependencies**.
+- No inbound ports, Linux intermediary, webhook, root, OpenClaw or multi-agent framework.
+- One AGY task at a time; `/cancel` stops its process group.
+- Allowlist both Telegram **user_id and chat_id** before running anything.
+- Private runtime config and update offset outside the source checkout.
+- AGY runs in a dedicated sandbox directory. Does not bypass its own tool-approval rules.
+- No incoming Telegram photo/voice/file handling, no arbitrary shell commands.
 
-## 第一階段範圍
+### Commands
 
-- Android 主動使用 Telegram Bot API long polling，無須對外開啟接收埠。
-- 授權的 Telegram 使用者傳送文字；Bot 按需啟動官方 `agy`，把真實模型回答回傳原聊天。
-- 只允許一項 AGY 任務；忙碌時回覆狀態，不建立複雜工作佇列。
-- 以使用者與聊天的成對白名單檢查授權，未授權訊息不得啟動 AGY。
-- 最小指令：`/start`、`/help`、`/status`、`/cancel`。
-- 處理錯誤、逾時、取消、長回覆分段、網路恢復及子程序清理。
-- 使用自有工作目錄與限定工具權限；不提供任意遠端 shell、root 操作或全面跳過核准。
+| Command | Behavior |
+| --- | --- |
+| Plain text | Starts one **independent** AGY JSON request (no session continuity yet) |
+| `/start`, `/help` | Lists supported actions |
+| `/status` | Shows busy / idle |
+| `/cancel` | Stops the active AGY subprocess |
+| Other commands | Returns an unsupported-command message |
 
-## 預定設定
+**Not part of P0:** `/new`, `/session`, `/model`, `/models`, `/ls`, `/quota`, `/usage`. These will be discussed after an actual Telegram ↔ AGY device round trip succeeds. Session/model/effort behavior differs between CLI agents; the project intentionally has no speculative multi-agent infrastructure.
 
-`config.example.json` 是未來實作的設定契約草案，不是目前可用的啟動設定。所有值都是占位符，後續程式須驗證路徑、數值與白名單。
+## Prerequisites
 
-- 新建專用 Telegram Bot；實際 token 與白名單只存於 Termux 私有儲存空間、Git 工作目錄之外，檔案權限設為 `0600`。
-- 安裝官方 AGY，先在同一 Termux App 身分完成 Google 登入，再驗證單次 JSON 請求。
-- 實際設定不得提交；例子中的路徑與識別碼不能直接當生產設定使用。
-- 不提交對話、實機紀錄、截圖、裝置識別資訊、私有連結或第三方執行檔。
-- 每次推送前須掃描追蹤檔案與完整 Git 歷史，包括提交訊息和作者資訊；`.gitignore` 不能清除已提交的敏感內容。
+- Android + [Termux](https://github.com/termux/termux-app) with Python 3.
+- Official [Antigravity CLI](https://www.antigravity.google/docs/cli/headless/) installed for the Android architecture, authenticated **in the same Termux user**.
+- A dedicated Telegram Bot created via BotFather with a private token.
+- Correct Telegram user and chat numeric IDs. Find them privately; do **not** post token/IDs in issues, logs, screenshots or commits.
+- Internet access for Telegram and AGY cloud model calls.
 
-## CLI 整合注意事項
+In Termux:
 
-- 初版使用 `agy -p ... --output-format json`；後續可評估以指定 conversation ID 接續對話。
-- exit code 0 或 `SUCCESS` 不保證工具操作成功；必須檢查錯誤、拒絕清單與實際結果。
-- 串流模式不支援 `control_request`／`control_response`；不可將它當作工具核准協議。
-- CLI 與 Telegram 都需要服務連線；本專案不提供離線模型。
+```sh
+pkg update
+pkg install python git
+python --version
+command -v agy
+agy --version
+agy -p "Reply with: CLI_OK" --output-format json
+```
 
-## 官方參考
+Verify the final command actually returns a model response *before* starting the Telegram bridge. A successful login or CLI exit code alone does not establish that tools executed successfully.
 
-- [Telegram Bot API](https://core.telegram.org/bots/api)
-- [Termux](https://github.com/termux/termux-app)
-- [Antigravity CLI Headless](https://www.antigravity.google/docs/cli/headless/)
-- [Antigravity CLI 權限](https://www.antigravity.google/docs/permissions?tab=cli)
+## Configure privately
 
-## 授權
+Clone this repository and create the sandbox outside the source checkout:
 
-原創專案內容採 MIT；Google Antigravity、Telegram 與 Termux 依各自條款及授權提供。本儲存庫不重新發行它們的程式或憑證。
+```sh
+git clone https://github.com/antidark0605/android-telegram-agent.git
+cd android-telegram-agent
+mkdir -p "$HOME/telegram-agent-workspace" "$HOME/.config/android-telegram-agent"
+chmod 700 "$HOME/telegram-agent-workspace" "$HOME/.config/android-telegram-agent"
+cp config.example.json "$HOME/.config/android-telegram-agent/config.json"
+chmod 600 "$HOME/.config/android-telegram-agent/config.json"
+```
 
-## 術語白話解釋
+Edit the private configuration file using your preferred local editor, replacing **every** placeholder:
 
-- Bot／CLI／AGY／Termux：聊天機器人／命令介面／Google AI 命令工具／Android 終端機 App。
-- API／long polling／token：服務呼叫介面／由裝置持續等待新訊息的取件方式／機器人登入憑證。
-- root／shell／0600：最高管理權限／執行命令的程式／只有檔案持有人可讀寫的權限。
-- JSON／conversation ID／串流：程式文字資料格式／對話識別碼／逐筆傳送資料。
-- Git／追蹤檔案／提交：版本管理工具／納入版本管理的檔案／保存的一次版本紀錄。
-- API 28／ARM64／MIT：Android 9 系統介面版本／處理器架構／允許再利用且保留聲明的授權。
+```json
+{
+  "bot_token": "YOUR_BOT_TOKEN",
+  "allowed_pairs": [
+    {"user_id": "YOUR_USER_ID", "chat_id": "YOUR_CHAT_ID"}
+  ],
+  "agy_command": "agy",
+  "workspace": "/ABSOLUTE/PRIVATE/TERMUX/HOME/telegram-agent-workspace",
+  "task_timeout_seconds": 120
+}
+```
+
+Use your **actual** absolute Termux home workspace path, not the example path. Only local private configuration may contain real tokens or numeric IDs. Keep this config out of the Git checkout; the Bot refuses group/world-readable settings and refuses to start with placeholders.
+
+Run:
+
+```sh
+python bot.py --config "$HOME/.config/android-telegram-agent/config.json"
+```
+
+On first start, old queued Telegram messages are discarded to avoid executing stale prompts. The next new text message from an allowlisted user/chat triggers AGY. Bot restarts retain the Telegram update offset in the same private directory. Ctrl+C stops the Bot and cancels any active task.
+
+> Only **one** process may poll a given Telegram Bot token. Use a dedicated Bot for each deployed instance. Telegram and AGY require Internet. Android background execution, screen-off behavior and auto-start still need real-device testing; no guarantee of 24/7 uptime is implied.
+
+## Security
+
+- The Telegram bot token is an authentication credential: never commit it or publish full request URLs containing it. Real chat IDs, prompts, responses, OAuth state, private device information and test evidence must stay off public GitHub.
+- Keep all AGY tool permissions narrowly scoped. Even when a task reports success, a tool action may have been denied: the Bot checks denial metadata and never uses a global permission bypass.
+- Do not select the Termux home directory itself as the workspace, because it may contain AGY login data. Use a small dedicated subdirectory.
+- The Bot does **not** run privileged/root commands. Do not change that without an explicit security review.
+- Stop the running Bot before modifying/upgrading its source. Change runtime secrets in the private file, not the repo.
+- `.gitignore` does not retroactively remove accidentally committed data. Rotate exposed tokens immediately if this ever happens.
+
+## Tests
+
+```sh
+python -m unittest discover -s tests -v
+python -m compileall -q bot.py agy.py config.py telegram_api.py tests
+```
+
+Tests use synthetic messages and mocked AGY processes, with **no real Bot Token, network calls or device private data**. A GitHub Actions workflow runs them on multiple Python versions.
+
+### Real-device verification checklist
+
+1. Non-root Termux: AGY CLI independently answers a simple prompt.
+2. Dedicated Bot receives a fresh Telegram message and returns its **real** AGY result.
+3. Verify unauthorized sender/chat is ignored; no unauthorized AGY child starts.
+4. Repeated messages, busy response, `/cancel`, timeout and network recovery.
+5. Verify no child processes remain after cancellation/timeout.
+6. Check private config mode `0600`, no tokens in tracked files or logs.
+7. Measure idle/active memory and screen-off resilience on Android 9 / API 28 hardware.
+8. Report sanitized PASS/FAIL only; do not attach real transcripts, OAuth details, logs, device identifiers or internal paths to the public repository.
+
+## License
+
+The original project source is MIT licensed. Telegram, Termux and Google Antigravity CLI are separate software with their own terms. None of their binaries, tokens or authentication files are distributed here.
