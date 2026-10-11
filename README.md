@@ -2,7 +2,7 @@
 
 Lightweight Telegram bridge for AI CLI agents on Android via Termux.
 
-**Current implementation: AGY CLI only.** Other agents are not supported or bundled. Designed for regular (non-root) Termux, initially validated against an **Android 9 / API 28 / ARM64 commercial device**. This public project has no device-specific features.
+**Current implementation: AGY CLI only.** Other agents are not supported or bundled. Designed for regular (non-root) Termux. Initial CLI/runner validation was performed on an **Android 9 / API 28 / ARM64 commercial device**; the full Telegram round trip and background behavior are **not yet device-verified**. This public project has no device-specific features.
 
 ## P0 behavior
 
@@ -28,26 +28,46 @@ Telegram text → dedicated Bot (long polling) → on-demand official `agy` subp
 
 **Not part of P0:** `/new`, `/session`, `/model`, `/models`, `/ls`, `/quota`, `/usage`. These will be discussed after an actual Telegram ↔ AGY device round trip succeeds. Session/model/effort behavior differs between CLI agents; the project intentionally has no speculative multi-agent infrastructure.
 
-## Prerequisites
+## Dependencies and installation
 
-- Android + [Termux](https://github.com/termux/termux-app) with Python 3.
-- Official [Antigravity CLI](https://www.antigravity.google/docs/cli/headless/) installed for the Android architecture, authenticated **in the same Termux user**.
-- A dedicated Telegram Bot created via BotFather with a private token.
-- Correct Telegram user and chat numeric IDs. Find them privately; do **not** post token/IDs in issues, logs, screenshots or commits.
-- Internet access for Telegram and AGY cloud model calls.
+The runtime is intentionally small. **No third-party Python packages or `pip install` are required**: Telegram uses Python's built-in `urllib.request`, `json`, `threading` and `subprocess` modules. The **Android/Termux system tools below are still required**.
 
-In Termux:
+| Dependency | Required for | Installation / verification |
+| --- | --- | --- |
+| **Termux app** | Running the Bot as an ordinary Android app user | Install a supported release from the [official Termux project](https://github.com/termux/termux-app). Run the commands *inside Termux*, not as an ADB root shell. |
+| **Python 3.10+** | Running `bot.py`, Telegram networking and the AGY subprocess adapter | `pkg install python`, then `python --version`. Termux automatically installs the required Python package dependencies. |
+| **Official AGY CLI for Android architecture** | Cloud AI model execution; this is a separate binary, **not a Python package** | Follow the [official CLI setup guide](https://www.antigravity.google/docs/cli/install/) for the compatible Android/ARM64 build and complete authentication in the **same Termux app user**. Check `command -v agy` and `agy --version`. The Bot does not install or redistribute AGY. |
+| **Network access** | Telegram Bot API + AGY's online model service | Both endpoints need working DNS/TLS/HTTPS; no inbound port or webhook is needed. |
+| **Telegram Bot token and user/chat allowlist** | Bot authentication and access control | Obtain a dedicated Bot token and IDs privately; put them in a mode-`0600` config file **outside this Git checkout**. |
+| **Git** | **Only** for cloning/updating this repository | `pkg install git`; not required at runtime if the source is already present. |
+
+**Dependency baseline:** The non-root AGY runner has been exercised on Termux **0.118.3**, Python **3.14.6**, and official AGY CLI **1.3.3** on Android 9 / ARM64. These are **observed working versions, not version pins or a claim of universal Android support**. Synthetic unit tests have also passed on Python 3.10 and CI Python 3.11–3.13. Different Android releases and package versions need their own validation.
+
+### First-time Termux setup
+
+In the **non-root Termux terminal**:
 
 ```sh
+# Install system packages. No pip installation is required.
 pkg update
 pkg install python git
+
+# Confirm runtime availability.
+id
 python --version
+command -v python
 command -v agy
 agy --version
+
+# Verify AGY is authenticated and the cloud model really responds.
 agy -p "Reply with: CLI_OK" --output-format json
 ```
 
-Verify the final command actually returns a model response *before* starting the Telegram bridge. A successful login or CLI exit code alone does not establish that tools executed successfully.
+- `id` should identify the **Termux app UID, not uid=0 (root)**.
+- If `python: not found`, install Python with `pkg install python` and check again. `pkg` resolves Python's native package dependencies automatically; no extra `pip` requirements are hidden in this project.
+- If `agy: not found`, **stop here** and install the compatible official Android binary in this Termux environment first. Installing `python` does not install AGY.
+- The example `CLI_OK` is a synthetic marker, not a real token. Validate JSON `status=SUCCESS`, a nonempty `response` and no errors or permission denials; do **not** rely only on exit code 0.
+- Termux:API, Termux:Boot, Shizuku, Root, OpenClaw and a separate Python Telegram framework are **not required** for P0. Any optional background/boot management is a separate future task.
 
 ## Configure privately
 
