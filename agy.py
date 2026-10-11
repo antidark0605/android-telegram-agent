@@ -151,7 +151,7 @@ class AgyRunner:
                     self._process = None
 
 # Only pass a CLI-returned model slug as a single argv element, never a shell.
-MODEL_SLUG = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+){1,8}")
+MODEL_SLUG = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9.]+){1,8}")
 
 def parse_models(output: str) -> list[tuple[str, str]]:
     """Extract documented 'agy models' rows: slug + friendly display name.
@@ -162,7 +162,7 @@ def parse_models(output: str) -> list[tuple[str, str]]:
     found: list[tuple[str, str]] = []
     for line in output.splitlines():
         clean = re.sub(r"\x1b\[[0-9;]*m", "", line).strip()
-        match = re.match(r"^(?:[-*•]\s*)?([a-z][a-z0-9]*(?:-[a-z0-9]+){1,8})\s{2,}(.+?)\s*$", clean)
+        match = re.match(r"^(?:[-*•]\s*)?([a-z][a-z0-9]*(?:-[a-z0-9.]+){1,8})\s{2,}(.+?)\s*$", clean)
         if match:
             slug, title = match.groups()
             if MODEL_SLUG.fullmatch(slug) and slug not in {s for s, _ in found}:
