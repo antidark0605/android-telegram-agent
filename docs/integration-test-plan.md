@@ -18,6 +18,10 @@ Run once against the same PR build in isolated non-root Termux. Preserve the exi
 | A12 | /context and /quota | Verified token counts, correct labels, rate data or honest unavailable |
 | A13 | Concurrency, network retry, background, screen off | No duplicate requests, memory/process lifetime observed |
 | A14 | Public commits, workflows and logs | No private URLs, account identifiers, device IDs, or credentials |
+| A15 | Simulate Telegram HTTP 409, network error, transient send failure | Private JSONL distinguishes poll and send failures, records safe HTTP code and UTC timestamp; no raw exception, Token, URL or message text |
+| A16 | Corrupt or unwritable polling-offset state | Bot safely refuses to reset/replay updates silently; `offset_failed` captures stage and the error remains distinguishable from network failure |
+| A17 | Keep Bot idle and then run a long task | First `poll_ok` is visible, subsequent idle heartbeat is throttled (about 60 seconds), and task start/finish duration and send outcome appear without secret data |
+| A18 | Generate enough synthetic operational events for rotation | All active/backup log files stay private and bounded; logging failure does not break Telegram operation |
 
 For each case report PASS/FAIL/NOT VERIFIED with a short anonymized diagnosis in the private feedback channel. Store real evidence only locally. Do not merge until blocking cases are reviewed.
 
