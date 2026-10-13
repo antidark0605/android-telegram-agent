@@ -60,10 +60,16 @@ class OffsetStore:
 
     def read(self) -> int | None:
         try:
-            value = json.loads(self.path.read_text(encoding="utf8"))["next_offset"]
-            return value if type(value) is int and value >= 0 else None
-        except (OSError, ValueError, KeyError, TypeError):
-            return None
+            raw = self.path.read_text(encoding="utf8")
+        except FileNotFoundError:
+            return None  # First-time setup only.
+        try:
+            value = json.loads(raw)["next_offset"]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ValueError("Invalid private Telegram offset state") from None
+        if type(value) is not int or value < 0:
+            raise ValueError("Invalid private Telegram offset state")
+        return value
 
     def write(self, offset: int) -> None:
         write_private(self.path, {"next_offset": offset})
@@ -445,7 +451,11 @@ class TelegramAgyBot:
     def run(self) -> None:
         self.bridge.install(self.settings.workspace)
         self.events.log("bot_started", stage="startup")
-        offset = self.state.read()
+        try:
+            offset = self.state.read()
+        except (OSError, ValueError):
+            self.events.log("offset_failed", kind="storage", stage="startup")
+            raise
         if offset is None:
             stale = self.api.get_updates(-1, timeout=0)
             offset = max((item["update_id"] for item in stale
