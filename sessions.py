@@ -28,10 +28,20 @@ class SessionStore:
         self.path = path
         self.lock = threading.RLock()
         try:
-            data = json.loads(path.read_text(encoding="utf8"))
-            self.data = data if isinstance(data, dict) else {}
-        except (OSError, ValueError):
+            raw = path.read_text(encoding="utf8")
+        except FileNotFoundError:
             self.data = {}
+        else:
+            try:
+                data = json.loads(raw)
+            except ValueError as exc:
+                raise ValueError("Invalid private session state") from None
+            if not isinstance(data, dict) or any(
+                not isinstance(key, str) or not isinstance(value, dict)
+                for key, value in data.items()
+            ):
+                raise ValueError("Invalid private session state")
+            self.data = data
 
     def get(self, key: str) -> dict:
         with self.lock:
@@ -41,12 +51,16 @@ class SessionStore:
         with self.lock:
             row = dict(self.data.get(key, {}))
             row.update(updates)
-            self.data[key] = row
-            write_private(self.path, self.data)
+            candidate = dict(self.data)
+            candidate[key] = row
+            write_private(self.path, candidate)
+            self.data = candidate
             return dict(row)
 
     def reset(self, key: str) -> None:
         with self.lock:
             row = self.data.get(key, {})
-            self.data[key] = {"model": row.get("model")}
-            write_private(self.path, self.data)
+            candidate = dict(self.data)
+            candidate[key] = {"model": row.get("model")}
+            write_private(self.path, candidate)
+            self.data = candidate
