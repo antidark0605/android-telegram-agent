@@ -80,6 +80,30 @@ python bot.py --config "$HOME/.config/android-telegram-agent/config.json"
 
 Private files beside `config.json`: `telegram-offset.json`, `sessions.json`, and `ask-bridge/` question/answer files. File writes use atomic replacement and mode 0600; related directories should remain mode 0700. The only local AGY configuration change is a scoped workspace MCP server declaration. Token, conversations, original prompts, OAuth material, personal device identifiers and logs must never enter public GitHub, Actions artifacts or PR comments.
 
+## Private operational diagnostics
+
+The Bot records safe, timestamped operational events to a **local file outside Git**:
+
+```
+$HOME/.config/android-telegram-agent/events.jsonl
+```
+
+The actual directory is derived from the private config path, so installations with a different config location will put the file beside that config. Each entry has a UTC timestamp and a fixed event name; optional fields include a **safe** HTTP status (e.g. 409), failure class (`http`, `transport`, `protocol`, `api`, `storage`), stage, retry delay, task duration and batch count. Sensitive strings are **not** logged: no Token, user/chat IDs, chat content, AGY prompts/replies, API response bodies, URLs, exception text, OAuth, session IDs or device identifiers.
+
+Events include `poll_ok` (at most once per 60 seconds when idle), `poll_failed`, `inbound_authorized`, `send_attempt`, `send_ok`, `send_failed`, `task_started`, `task_finished`, `task_stop_requested`, `handler_failed`, `offset_failed`, `bot_started`, and `bot_stopped`. Failures from Telegram status-message edits and callbacks also have their own categories.
+
+Logs use owner-only **0600** files, a **512 KiB** limit per file, and at most **two rotated backups** (`.1`, `.2`). They are best-effort and do not block Telegram operation if storage for diagnostics is unavailable.
+
+Inspect locally, **never paste raw device logs into a public issue or CI**:
+
+```sh
+tail -n 80 "$HOME/.config/android-telegram-agent/events.jsonl"
+```
+
+**Troubleshooting a missing Telegram reply:** `poll_failed` with HTTP 409 suggests another long poller using the same Token; `poll_ok` without `inbound_authorized` calls for checking the authorized user/chat and message routing; `task_started` without `task_finished` indicates a running/stalled AGY task; `send_failed` means a Telegram outgoing request was not confirmed. `send_ok` is only Telegram API acknowledgement, **not proof that the recipient saw the message**. An `offset_failed` error stops the Bot rather than replaying potentially side-effecting commands indefinitely.
+
+**Delivery limitation:** This revision adds diagnosis, **not** a durable, exactly-once outgoing-message queue. Telegram `sendMessage` has no built-in idempotency token; replaying an ambiguous failed network request can duplicate answers. A failed outgoing send is logged but is not automatically replayed, and the receiving user may need to request status again. This is an explicit limitation for Local Agent acceptance testing.
+
 ## Context and rate limit accuracy
 
 The AGY JSON result has `usage.input_tokens`, `usage.output_tokens` and related token totals. These measure task processing, including possible multiple model calls; they **do not** represent current context occupancy. `/context` therefore shows only verifiable last-task counters and explicitly marks Context occupancy **unavailable** unless an independently verified live context source is added.
