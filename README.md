@@ -10,6 +10,7 @@ Small non-root **Termux + Telegram + official AGY CLI** Bot for Android. Origina
 | --- | --- |
 | Text | Run AGY in the current chat/Topic Session, resume the prior AGY conversation |
 | /start, /help | Show available commands |
+| /myid | Show the **current** Telegram user, chat type/ID and Topic ID, subject to the authorization policy |
 | /new | Reset this Topic's AGY conversation (keeps its model selection) |
 | /status | Show running/idle, selected model, current Session status, YOLO setting |
 | /model, /models | Pick a model/variant from `agy models`; **per Topic** |
@@ -29,6 +30,25 @@ Each task sends one `⏳ Running · MM:SS` status message with 🛑 Stop, edited
 AGY can call a small **local MCP tool** named `ask_telegram` with `question` and optional `choices` (every choice requires label, description and value). The Bot forwards the question to the same chat/Topic with inline choice buttons or accepts a free-text reply, then returns the answer to the waiting AGY MCP process. A pending free-text reply is not interpreted as a new task.
 
 On Bot startup, `AskBridge.install()` merges the single `telegram-ask` server into the selected **private workspace** `.agents/mcp_config.json`, without touching global AGY settings. Existing unrelated MCP servers are preserved. Startup fails safely on a conflicting `telegram-ask` definition. The bridge stores only pending question/answer data in the private config directory, cleans it when a task ends and never exposes an HTTP listener. The installed AGY CLI must support workspace stdio MCP and load its configuration; **this must be verified on the device**.
+
+## Telegram access control and first-time `/myid` setup
+
+This Bot does not authorize an entire group just because a message arrived there. Every normal incoming text command, AGY prompt, Topic/session action and inline callback requires an exact **`(user_id, chat_id)` pair** in the private `allowed_pairs` configuration. The chat ID may be negative for Telegram groups/supergroups; Topic IDs are routing/session scopes *inside* an authorized chat, not independent permissions. If another user joins an authorized group, that user still cannot control AGY until their **own user/chat pair** is explicitly added. Unknown senders are ignored and do not receive a denial message. Bot-originated messages are ignored to avoid loops.
+
+After your authorized account sends `/myid`, the Bot replies **in that same chat/Topic** with only the caller's `user_id`, `chat_id`, `chat_type` and `thread_id` (`none` outside a Topic). It does not reveal the configured allowlist, Bot Token, other users or AGY state.
+
+**First-time setup (optional):** If you do not yet know your IDs, you may **temporarily** enable `"allow_unlisted_myid": true` in your local private config. This enables `/myid` **only for an unlisted sender's own 1:1 private chat** (`chat.type == "private"` and `chat.id == from.id`). No other commands, callbacks, Ask replies, task launches or group chats become authorized. For a fresh installation, `allowed_pairs: []` is permitted **only while this explicit discovery option is enabled**. Send `/myid` after the Bot has started, note the IDs **locally**, then set:
+
+```json
+{
+  "allowed_pairs": [
+    {"user_id": "YOUR_USER_ID", "chat_id": "YOUR_CHAT_ID"}
+  ],
+  "allow_unlisted_myid": false
+}
+```
+
+The JSON above is an **excerpt** to merge into the existing config, not a replacement for the Token/workspace/model fields. Restart the Bot after editing the file, without running two long-pollers for the same Token. The discovery option is **false by default**. If you want a group/Topic Chat ID, first authorize your own user ID in that group's chat pair through private configuration; discovery does not allow arbitrary group probing. Never place actual numeric IDs in public GitHub, screenshots, PR comments or CI logs.
 
 ## Dependencies
 
@@ -68,7 +88,8 @@ Replace placeholders in `$HOME/.config/android-telegram-agent/config.json` using
   "workspace": "/ABSOLUTE/PRIVATE/TERMUX/WORKSPACE",
   "task_timeout_seconds": null,
   "print_timeout": "24h",
-  "yolo": false
+  "yolo": false,
+  "allow_unlisted_myid": false
 }
 ```
 
