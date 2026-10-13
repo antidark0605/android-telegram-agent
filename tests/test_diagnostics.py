@@ -102,6 +102,15 @@ class BotLogTests(unittest.TestCase):
         self.assertTrue(any(r["event"] == "bot_stopped" for r in rows))
         self.assertNotIn("unsafe private exception", self.bot.events.path.read_text())
 
+    def test_corrupt_offset_does_not_reset_or_consume_updates(self):
+        self.bot.state.path.write_text('not-json', encoding="utf8")
+        with self.assertRaises(ValueError):
+            self.bot.run()
+        self.api.get_updates.assert_not_called()
+        rows = self._records()
+        self.assertTrue(any(row["event"] == "offset_failed" and
+                            row["stage"] == "startup" for row in rows))
+
     def test_offset_failure_is_separate_and_stops(self):
         self.bot.state.write(0)
         self.api.get_updates.return_value = [{
