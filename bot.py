@@ -567,7 +567,11 @@ def main() -> int:
     except ConfigError as exc:
         print("Configuration error:", str(exc), flush=True)
         return 2
-    bot = TelegramAgyBot(settings, TelegramAPI(settings.bot_token))
+    try:
+        bot = TelegramAgyBot(settings, TelegramAPI(settings.bot_token))
+    except (OSError, ValueError):
+        print("Bot could not load private state; inspect local files.", flush=True)
+        return 1
     def terminate(_sig, _frame):
         bot.stop()
     signal.signal(signal.SIGTERM, terminate)
