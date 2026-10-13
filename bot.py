@@ -79,6 +79,7 @@ class TelegramAgyBot:
         self._worker: threading.Thread | None = None
         self._picker: Picker | None = None
         self._pending: Pending | None = None
+        self._auxiliary = False
         self._stop = threading.Event()
 
     def _send(self, chat: int, text: str, thread: int | None = None,
@@ -149,6 +150,7 @@ class TelegramAgyBot:
             text_out = (status_text("⏳ Running", active.started, active.model)
                         if active and active.session_key == key else "Idle")
             self._send(chat_id, f"{text_out}\nSelected model: {row.get('model') or 'AGY default'}"
+                       f"\nLast reported model: {row.get('last_actual_model') or 'not reported by AGY'}"
                        f"\nSession: {'active' if row.get('conversation_id') else 'new'}"
                        f"\nYOLO: {'enabled' if self.settings.yolo else 'disabled'}", thread)
         elif cmd == "/new":
@@ -179,8 +181,12 @@ class TelegramAgyBot:
                 self._send(chat_id, "Context occupancy: unavailable from Headless JSON.\n"
                            "Last completed task tokens (NOT context used %):\n" + details, thread)
         elif cmd in ("/quota", "/usage"):
-            if active:
-                self._send(chat_id, "Quota query unavailable while an AGY task is active.", thread)
+            with self._lock:
+                available = self._active is None and not self._auxiliary
+                if available:
+                    self._auxiliary = True
+            if not available:
+                self._send(chat_id, "AGY is busy; retry quota later.", thread)
             else:
                 threading.Thread(target=self._quota, args=(chat_id, thread),
                                  daemon=True, name="agy-quota").start()
@@ -192,13 +198,17 @@ class TelegramAgyBot:
             self._start_task(text, user, chat_id, thread, key)
 
     def _quota(self, chat: int, thread: int | None) -> None:
-        report = usage_report(self.settings.agy_command, self.settings.workspace)
-        self._send(chat, "AGY /usage:\n" + report if report else
-                   "AGY rate-limit report unavailable in this CLI environment.", thread)
+        try:
+            report = usage_report(self.settings.agy_command, self.settings.workspace)
+            self._send(chat, "AGY /usage:\n" + report if report else
+                       "AGY rate-limit report unavailable in this CLI environment.", thread)
+        finally:
+            with self._lock:
+                self._auxiliary = False
 
     def _models(self, user: int, chat: int, thread: int | None, key: str) -> None:
         with self._lock:
-            busy = self._active is not None
+            busy = self._active is not None or self._auxiliary
         if busy:
             self._send(chat, "Model selection is unavailable during an active task.", thread)
             return
@@ -221,7 +231,7 @@ class TelegramAgyBot:
     def _start_task(self, prompt: str, user: int, chat: int,
                     thread: int | None, key: str) -> None:
         with self._lock:
-            if self._active is not None:
+            if self._active is not None or self._auxiliary:
                 busy = True
             else:
                 busy = False
@@ -376,7 +386,7 @@ class TelegramAgyBot:
         elif data.startswith("model:"):
             with self._lock:
                 picker = self._picker
-                busy = self._active is not None
+                busy = self._active is not None or self._auxiliary
                 valid = (picker is not None and picker.user == uid
                          and picker.chat == cid and picker.message_id == mid)
                 if valid and not busy and data == "model:default":
