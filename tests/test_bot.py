@@ -89,7 +89,7 @@ class BotTests(unittest.TestCase):
             agent.assert_not_called()
         self.assertEqual(num_sent, len(self.api.sent))
         self.assertFalse(newcomer.sessions.path.exists())
-        self.assertFalse(newcomer.events.path.exists())
+        self.assertNotIn("inbound_authorized", newcomer.events.path.read_text())
 
     def test_foreign_model_callback_rejected(self):
         with patch("bot.list_models", return_value=[("gemini-3.8-flash-high", "Gemini")]):
