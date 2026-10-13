@@ -71,7 +71,8 @@ class EventLogger:
         if self.path.is_symlink():
             return
         if self.path.exists() and self.path.stat().st_size + len(payload) > self.max_bytes:
-            self._rotate()
+            if not self._rotate():
+                return
         flags = os.O_CREAT | os.O_WRONLY | os.O_APPEND
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
@@ -85,12 +86,13 @@ class EventLogger:
         finally:
             os.close(fd)
 
-    def _rotate(self) -> None:
+    def _rotate(self) -> bool:
         older = self.path.with_suffix(self.path.suffix + ".2")
         newer = self.path.with_suffix(self.path.suffix + ".1")
         if older.is_symlink() or newer.is_symlink():
-            return
+            return False
         if newer.exists():
             newer.replace(older)
         if self.path.exists():
             self.path.replace(newer)
+        return True
