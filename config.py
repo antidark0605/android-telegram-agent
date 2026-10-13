@@ -18,8 +18,10 @@ class Settings:
     allowed_pairs: frozenset[tuple[int, int]]
     agy_command: str
     workspace: Path
-    task_timeout_seconds: int
+    task_timeout_seconds: int | None
     config_path: Path
+    yolo: bool = False
+    print_timeout: str = "24h"
 
     @property
     def state_path(self) -> Path:
@@ -92,6 +94,14 @@ def load_settings(filename: str | Path) -> Settings:
         raise ConfigError("workspace and configuration must be separate")
     if work.stat().st_mode & (stat.S_IWGRP | stat.S_IWOTH):
         raise ConfigError("workspace must not be group/world writable")
-    timeout = _integer(raw.get("task_timeout_seconds", 120),
-                       "task_timeout_seconds", minimum=15, maximum=1800)
-    return Settings(token, frozenset(allowed), command, work, timeout, path)
+    timeout_raw = raw.get("task_timeout_seconds", None)
+    timeout = None if timeout_raw is None else _integer(
+        timeout_raw, "task_timeout_seconds", minimum=15, maximum=86400)
+    yolo = raw.get("yolo", False)
+    if type(yolo) is not bool:
+        raise ConfigError("yolo must be a boolean")
+    print_timeout = raw.get("print_timeout", "24h")
+    if (not isinstance(print_timeout, str)
+            or not __import__("re").fullmatch(r"[1-9][0-9]{0,4}[smh]", print_timeout)):
+        raise ConfigError("print_timeout must be a positive duration like 24h")
+    return Settings(token, frozenset(allowed), command, work, timeout, path, yolo, print_timeout)

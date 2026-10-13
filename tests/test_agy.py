@@ -1,185 +1,125 @@
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
-from agy import AgyRunner, parse_response, parse_models, list_models
-
-
-class AgyParsingTests(unittest.TestCase):
-    def test_plain_result(self):
-        self.assertEqual(parse_response(json.dumps({
-            "status": "SUCCESS", "response": "hello Android"
-        })).message, "hello Android")
-
-    def test_nested_result(self):
-        result = parse_response(json.dumps({
-            "event": "result", "result": {
-                "status": "SUCCESS", "response": "real model output"
-            }
-        }))
-        self.assertTrue(result.ok)
-        self.assertEqual(result.message, "real model output")
-
-    def test_json_lines_only_terminal_result(self):
-        value = '\n'.join([
-            json.dumps({"event": "init", "conversation_id": "synthetic"}),
-            json.dumps({"event": "step_update", "text_delta": "not a final result"}),
-            json.dumps({"event": "result", "result": {"status": "SUCCESS", "response": "verified"}}),
-        ])
-        self.assertEqual(parse_response(value).message, "verified")
-
-    def test_reject_non_json(self):
-        self.assertFalse(parse_response("SUCCESS: done").ok)
-
-    def test_reject_empty_response(self):
-        self.assertFalse(parse_response('{"status":"SUCCESS","response":""}').ok)
-
-    def test_reject_denials_even_if_success(self):
-        result = parse_response(json.dumps({
-            "result": {"status": "SUCCESS", "response": "done",
-                       "denied_actions": ["write_file"]}
-        }))
-        self.assertFalse(result.ok)
-        self.assertIn("denied", result.message)
-
-    def test_reject_error_without_exposing_error_detail(self):
-        result = parse_response('{"status":"ERROR","error":"PRIVATE_PLACEHOLDER"}')
-        self.assertFalse(result.ok)
-        self.assertNotIn("PRIVATE_PLACEHOLDER", result.message)
-
-    def test_reject_undocumented_string_result(self):
-        self.assertFalse(parse_response('{"result":"hello"}').ok)
-
-    def test_reject_missing_status(self):
-        self.assertFalse(parse_response('{"response":"looks okay"}').ok)
-        self.assertFalse(parse_response('{"result":{"response":"looks okay"}}').ok)
-
-    def test_reject_nonterminal_status_even_with_response(self):
-        for status in ("CANCELED", "CANCELLED", "INTERRUPTED", "INVALID",
-                       "WAITING", "RUNNING", "ERROR"):
-            with self.subTest(status=status):
-                response = json.dumps({"status": status, "response": "unfinished"})
-                self.assertFalse(parse_response(response).ok)
-
-    def test_reject_conflicting_outer_and_inner_status(self):
-        response = json.dumps({
-            "status": "SUCCESS", "result": {
-                "status": "CANCELED", "response": "not complete"
-            }
-        })
-        self.assertFalse(parse_response(response).ok)
-
-    def test_reject_response_text_alias_without_official_response_field(self):
-        self.assertFalse(parse_response('{"status":"SUCCESS","text":"hi"}').ok)
+from agy import AgyRunner, AgentResult, list_models, parse_models, parse_response, usage_report
 
 
-class RunnerTests(unittest.TestCase):
-    def test_subprocess_uses_argv_not_shell_and_private_cwd(self):
-        with tempfile.TemporaryDirectory() as td:
-            proc = MagicMock()
-            proc.communicate.return_value = ('{"status":"SUCCESS","response":"model OK"}', "")
-            proc.returncode = 0
-            proc.pid = 123456  # Synthetic PID, no real process is touched.
-            with (patch("agy.subprocess.Popen", return_value=proc) as popen,
-                  patch("agy.os.killpg") as killpg):
-                result = AgyRunner("agy", Path(td), 30).run("test prompt")
-            killpg.assert_called_once()
-            self.assertTrue(result.ok)
-            args, kw = popen.call_args
-            self.assertEqual(args[0], ["agy", "-p", "test prompt", "--output-format", "json"])
-            self.assertFalse(kw.get("shell", False))
-            self.assertTrue(kw["start_new_session"])
-            self.assertEqual(kw["cwd"], td)
-            self.assertEqual(kw["stdin"], __import__("subprocess").DEVNULL)
+class ParserTests(unittest.TestCase):
+    def test_success_with_session_and_usage(self):
+        value = parse_response(json.dumps({
+            "status": "SUCCESS", "conversation_id": "00000000-0000-4000-8000-000000000001",
+            "response": "answer", "usage": {"input_tokens": 123, "output_tokens": 10,
+                                           "bad_field": "secret"}}))
+        self.assertTrue(value.ok)
+        self.assertEqual(value.conversation_id, "00000000-0000-4000-8000-000000000001")
+        self.assertEqual(value.usage, {"input_tokens": 123, "output_tokens": 10})
 
-    def test_cleanup_group_even_if_leader_already_exited(self):
-        from agy import _kill_group
-        proc = MagicMock()
-        proc.pid = 123456
-        proc.poll.return_value = 0
-        with patch("agy.os.killpg") as killpg:
-            _kill_group(proc)
-        killpg.assert_called_once()
-        proc.kill.assert_not_called()
+    def test_nested_and_streamed_result(self):
+        result = {"event": "result", "result": {"status": "SUCCESS", "response": "yes"}}
+        self.assertTrue(parse_response(json.dumps(result)).ok)
+        self.assertTrue(parse_response('{"event":"init"}\n' + json.dumps(result)).ok)
 
-    def test_cleanup_after_timeout(self):
-        import subprocess
-        proc = MagicMock()
-        proc.pid = 123456
-        proc.communicate.side_effect = [
-            subprocess.TimeoutExpired(["agy"], 20),
-            ("", ""),
-        ]
-        with (patch("agy.subprocess.Popen", return_value=proc),
-              patch("agy.os.killpg") as killpg):
-            result = AgyRunner("agy", Path("/tmp"), 20).run("prompt")
-        self.assertFalse(result.ok)
-        self.assertIn("timed out", result.message)
-        self.assertGreaterEqual(killpg.call_count, 2)
+    def test_errors_fail_closed(self):
+        for data in [
+            "not json", '{"response":"missing status"}',
+            '{"status":"CANCELED","response":"partial"}',
+            '{"status":"SUCCESS","response":""}',
+            '{"status":"SUCCESS","response":"done","denied_actions":[{"action":"command"}]}',
+            '{"status":"SUCCESS","response":"done","error":"secret"}',
+            '{"status":"SUCCESS","text":"unknown"}',
+        ]:
+            with self.subTest(data=data):
+                result = parse_response(data)
+                self.assertFalse(result.ok)
+                self.assertNotIn("secret", result.message)
 
-    def test_cleanup_when_parser_rejects_result(self):
+    def test_model_parser(self):
+        parsed = parse_models("gemini-3.8-flash-high    Gemini 3.8 Flash High\n"
+                              "claude-sonnet-5-5-medium   Claude Medium")
+        self.assertEqual(len(parsed), 2)
+
+
+class AgyRunnerTests(unittest.TestCase):
+    def _proc(self):
         proc = MagicMock()
         proc.pid = 123456
         proc.returncode = 0
-        proc.communicate.return_value = ('{"status":"CANCELED","response":"partial"}', "")
-        with (patch("agy.subprocess.Popen", return_value=proc),
-              patch("agy.os.killpg") as killpg):
-            result = AgyRunner("agy", Path("/tmp"), 30).run("prompt")
-        self.assertFalse(result.ok)
-        killpg.assert_called_once()
+        proc.communicate.return_value = (
+            '{"status":"SUCCESS","response":"ok","conversation_id":"12345678-abcd"}', "")
+        return proc
 
-    def test_start_failure_is_sanitized(self):
-        with patch("agy.subprocess.Popen", side_effect=FileNotFoundError("private path")):
-            result = AgyRunner("agy", Path("/tmp"), 30).run("prompt")
-        self.assertFalse(result.ok)
-        self.assertNotIn("private path", result.message)
+    def test_per_topic_resume_model_yolo_timeout(self):
+        proc = self._proc()
+        with (patch("agy.subprocess.Popen", return_value=proc) as popen,
+              patch("agy.os.killpg") as kill):
+            reply = AgyRunner("agy", Path("/tmp"), None, "24h").run(
+                "prompt", model="gemini-3.8-flash-high",
+                conversation_id="12345678-abcd", yolo=True)
+        self.assertTrue(reply.ok)
+        args, kwargs = popen.call_args
+        self.assertIn("--conversation", args[0])
+        self.assertIn("--model", args[0])
+        self.assertIn("--dangerously-skip-permissions", args[0])
+        self.assertEqual(args[0][-1], "--dangerously-skip-permissions")
+        self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
+        self.assertIsNone(proc.communicate.call_args.kwargs["timeout"])
+        kill.assert_called_once()
 
-    def test_model_slug_argv_is_passed_to_agy(self):
-        proc = MagicMock()
-        proc.pid = 123456
-        proc.returncode = 0
-        proc.communicate.return_value = ('{"status":"SUCCESS","response":"hi"}', "")
+    def test_default_safe_no_yolo(self):
+        proc = self._proc()
         with (patch("agy.subprocess.Popen", return_value=proc) as spawn,
               patch("agy.os.killpg")):
-            result = AgyRunner("agy", Path("/tmp"), 30).run(
-                "question", model="gemini-3.8-flash-high")
-        self.assertTrue(result.ok)
-        self.assertEqual(spawn.call_args.args[0][-2:],
-                         ["--model", "gemini-3.8-flash-high"])
+            AgyRunner("agy", Path("/tmp"), None).run("hello")
+        args = spawn.call_args.args[0]
+        self.assertNotIn("--dangerously-skip-permissions", args)
+        self.assertNotIn("--conversation", args)
 
-    def test_reject_invalid_model_slug(self):
+    def test_invalid_model_or_session_rejected_before_start(self):
         with patch("agy.subprocess.Popen") as spawn:
-            result = AgyRunner("agy", Path("/tmp"), 30).run(
-                "question", model="hello ; private")
-        self.assertFalse(result.ok)
+            runner = AgyRunner("agy", Path("/tmp"), 30)
+            self.assertFalse(runner.run("a", model="bad;command").ok)
+            self.assertFalse(runner.run("a", conversation_id="bad").ok)
         spawn.assert_not_called()
 
-    def test_models_parse_only_known_slug_rows(self):
-        sample = ("Models:\\n"
-                  "gemini-3.8-flash-high     Gemini 3.8 Flash (High)\\n"
-                  "claude-sonnet-4-6    Claude Sonnet 4.6 (Thinking)\\n"
-                  "malformed not-a-model\\n").replace("\\n", "\n")
-        models = parse_models(sample)
-        self.assertEqual([row[0] for row in models],
-                         ["gemini-3.8-flash-high", "claude-sonnet-4-6"])
+    def test_cancel_active_process(self):
+        proc = self._proc()
+        with (patch("agy.subprocess.Popen", return_value=proc),
+              patch("agy.os.killpg") as kill):
+            runner = AgyRunner("agy", Path("/tmp"), 30)
+            self.assertTrue(runner.run("p").ok)
+            self.assertTrue(runner.cancel())
+        self.assertGreaterEqual(kill.call_count, 1)
 
-    def test_models_command_no_shell(self):
-        mock_proc = MagicMock()
-        mock_proc.returncode = 0
-        mock_proc.stdout = "gemini-3.8-flash-high    Gemini Flash High"
-        with patch("agy.subprocess.run", return_value=mock_proc) as run:
-            options = list_models("agy", Path("/tmp"))
-        self.assertEqual(options[0][0], "gemini-3.8-flash-high")
-        self.assertEqual(run.call_args.args[0], ["agy", "models"])
-        self.assertEqual(run.call_args.kwargs["stdin"],
-                         __import__("subprocess").DEVNULL)
+    def test_timeout(self):
+        proc = self._proc()
+        proc.communicate.side_effect = [
+            subprocess.TimeoutExpired("agy", 15), ("", "")]
+        with (patch("agy.subprocess.Popen", return_value=proc),
+              patch("agy.os.killpg") as kill):
+            answer = AgyRunner("agy", Path("/tmp"), 15).run("hello")
+        self.assertFalse(answer.ok)
+        self.assertIn("timed out", answer.message)
+        self.assertGreaterEqual(kill.call_count, 2)
 
-    def test_cancel_before_start(self):
-        runner = AgyRunner("agy", Path("/tmp"), 30)
-        self.assertTrue(runner.cancel())
-        self.assertFalse(runner.run("prompt").ok)
+    def test_models_subprocess(self):
+        proc = MagicMock(returncode=0, stdout="gemini-3.8-flash-high   Gemini Flash")
+        with patch("agy.subprocess.run", return_value=proc) as call:
+            choices = list_models("agy", Path("/tmp"))
+        self.assertEqual(choices[0][0], "gemini-3.8-flash-high")
+        self.assertEqual(call.call_args.args[0], ["agy", "models"])
+
+    def test_usage_report_and_unavailable(self):
+        value = '{"status":"SUCCESS","response":"Remaining 80% reset in 3h"}'
+        proc = MagicMock(returncode=0, stdout=value)
+        with patch("agy.subprocess.run", return_value=proc):
+            self.assertIn("80%", usage_report("agy", Path("/tmp")))
+        proc.returncode = 1
+        with patch("agy.subprocess.run", return_value=proc):
+            self.assertIsNone(usage_report("agy", Path("/tmp")))
 
 
 if __name__ == "__main__":

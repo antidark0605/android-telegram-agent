@@ -1,53 +1,19 @@
-"""Minimal non-root Telegram ↔ AGY bridge with task status buttons."""
+"""Lightweight Telegram ↔ AGY: topic sessions, model picker, live Stop, Ask MCP."""
 from __future__ import annotations
-
 import argparse
 import json
-import os
 import secrets
 import signal
-import tempfile
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from agy import AgyRunner, MODEL_SLUG, list_models
+from agy import AgyRunner, list_models, usage_report
+from ask_bridge import AskBridge
 from config import ConfigError, Settings, load_settings
+from sessions import SessionStore, scope, write_private
 from telegram_api import TelegramAPI, TelegramError
-
-
-class OffsetStore:
-    """Atomic private JSON state, initially used for the Telegram update offset."""
-
-    def __init__(self, path: Path):
-        self.path = path
-
-    def read(self) -> int | None:
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-            value = data.get("next_offset")
-            return value if type(value) is int and value >= 0 else None
-        except (OSError, ValueError, AttributeError):
-            return None
-
-    def write(self, value: int) -> None:
-        private_json(self.path, {"next_offset": value})
-
-
-def private_json(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".state-", dir=path.parent)
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as file:
-            json.dump(data, file)
-            file.flush()
-            os.fsync(file.fileno())
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
 
 
 @dataclass
@@ -56,54 +22,71 @@ class Task:
     owner: int
     chat: int
     thread: int | None
+    session_key: str
     runner: AgyRunner
     model: str | None
-    started_at: float
+    started: float
     message_id: int | None = None
 
 
 @dataclass
 class Picker:
-    owner: int
+    user: int
     chat: int
     thread: int | None
     message_id: int
-    models: list[tuple[str, str]]
+    options: list[tuple[str, str]]
 
 
-def task_status(state: str, started: float, model: str | None) -> str:
-    elapsed = max(0, int(time.monotonic() - started))
-    duration = f"{elapsed // 60:02d}:{elapsed % 60:02d}"
-    model_label = model or "AGY default"
-    return f"{state} · {duration}\nModel: {model_label}"
+@dataclass
+class Pending:
+    question: dict
+    message_id: int
+
+
+def status_text(state: str, started: float, model: str | None) -> str:
+    seconds = max(0, int(time.monotonic() - started))
+    return f"{state} · {seconds // 60:02d}:{seconds % 60:02d}\nModel: {model or 'AGY default'}"
+
+
+def stop_keyboard(key: str) -> dict:
+    return {"inline_keyboard": [[{"text": "🛑 Stop", "callback_data": "stop:" + key}]]}
+
+
+class OffsetStore:
+    def __init__(self, path: Path):
+        self.path = path
+
+    def read(self) -> int | None:
+        try:
+            value = json.loads(self.path.read_text(encoding="utf8"))["next_offset"]
+            return value if type(value) is int and value >= 0 else None
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+
+    def write(self, offset: int) -> None:
+        write_private(self.path, {"next_offset": offset})
 
 
 class TelegramAgyBot:
     def __init__(self, settings: Settings, api: TelegramAPI):
-        self.settings = settings
-        self.api = api
+        self.settings, self.api = settings, api
         self.state = OffsetStore(settings.state_path)
-        self._lock = threading.Lock()
+        self.sessions = SessionStore(settings.config_path.parent / "sessions.json")
+        self.bridge = AskBridge(settings.config_path.parent / "ask-bridge")
+        self._lock = threading.RLock()
         self._active: Task | None = None
         self._worker: threading.Thread | None = None
         self._picker: Picker | None = None
-        self._selected_path = settings.config_path.parent / "selected-model.json"
-        self._model = self._read_model()
+        self._pending: Pending | None = None
         self._stop = threading.Event()
 
-    def _read_model(self) -> str | None:
+    def _send(self, chat: int, text: str, thread: int | None = None,
+              markup: dict | None = None) -> int | None:
         try:
-            value = json.loads(self._selected_path.read_text(encoding="utf-8")).get("model")
-            return value if isinstance(value, str) and MODEL_SLUG.fullmatch(value) else None
-        except (OSError, ValueError, AttributeError):
-            return None
-
-    def _reply(self, chat: int, text: str, thread: int | None = None,
-               reply_markup: dict | None = None) -> int | None:
-        try:
-            return self.api.send_text(chat, text, thread, reply_markup=reply_markup)
+            return self.api.send_text(chat, text, thread, reply_markup=markup)
         except TelegramError:
-            print("Telegram send failed; check network/bot permission.", flush=True)
+            print("Telegram send failed.", flush=True)
             return None
 
     def _edit(self, chat: int, message_id: int, text: str,
@@ -114,9 +97,9 @@ class TelegramAgyBot:
         except TelegramError:
             return False
 
-    def _answer(self, query_id: str, message: str = "") -> None:
+    def _ack(self, query_id: str, text: str = "") -> None:
         try:
-            self.api.answer_callback(query_id, message)
+            self.api.answer_callback(query_id, text)
         except TelegramError:
             pass
 
@@ -130,213 +113,320 @@ class TelegramAgyBot:
         sender, chat = message.get("from"), message.get("chat")
         if not isinstance(sender, dict) or not isinstance(chat, dict):
             return
-        user_id, chat_id = sender.get("id"), chat.get("id")
-        if (type(user_id) is not int or type(chat_id) is not int
-                or (user_id, chat_id) not in self.settings.allowed_pairs):
-            return
-        content = message.get("text")
-        if not isinstance(content, str) or not content.strip():
+        user, chat_id = sender.get("id"), chat.get("id")
+        if (type(user) is not int or type(chat_id) is not int
+                or (user, chat_id) not in self.settings.allowed_pairs):
             return
         thread = message.get("message_thread_id")
         if type(thread) is not int:
             thread = None
+        content = message.get("text")
+        if not isinstance(content, str) or not content.strip():
+            return
         text = content.strip()
-        cmd = text.split(maxsplit=1)[0].split("@", 1)[0].lower()
+        key = scope(user, chat_id, thread)
+        cmd, _, arg = text.partition(" ")
+        cmd = cmd.split("@", 1)[0].lower()
+        with self._lock:
+            pending = self._pending
+            active = self._active
+        # While an AGY MCP question is pending, free text is an answer.
+        if (pending and active and pending.question["task"] == active.key
+                and active.owner == user and active.chat == chat_id
+                and active.thread == thread and not text.startswith("/")):
+            self._answer_question(pending, text[:3000])
+            return
         if cmd in ("/start", "/help"):
-            self._reply(chat_id, "Android Telegram Agent (AGY)\n"
-                        "Send a prompt to start a task with a live timer and Stop button.\n"
-                        "/start /help /status /models /model\n"
-                        "Sessions are planned for a later release.", thread)
+            self._send(chat_id, "AGY Telegram Agent\n"
+                       "Text: continue current topic conversation\n"
+                       "/new: start new conversation in this topic\n"
+                       "/model, /models: choose model\n"
+                       "/status, /context, /quota: show status\n"
+                       "Tap 🛑 Stop to interrupt running tasks.\n"
+                       "No collaboration or kanban.", thread)
         elif cmd == "/status":
-            with self._lock:
-                active, model = self._active, self._model
-            self._reply(chat_id, task_status("⏳ Running", active.started_at, active.model)
-                        if active else f"Idle · Model: {model or 'AGY default'}", thread)
-        elif cmd in ("/models", "/model"):
-            option = text[len(text.split(maxsplit=1)[0]):].strip()
-            if option.lower() == "default" and cmd == "/model":
-                with self._lock:
-                    busy = self._active is not None
-                    if not busy:
-                        self._model = None
-                        self._picker = None
-                        private_json(self._selected_path, {"model": None})
-                self._reply(chat_id, "Finish the running task first." if busy
-                            else "Model reset to AGY default.", thread)
+            row = self.sessions.get(key)
+            text_out = (status_text("⏳ Running", active.started, active.model)
+                        if active and active.session_key == key else "Idle")
+            self._send(chat_id, f"{text_out}\nSelected model: {row.get('model') or 'AGY default'}"
+                       f"\nSession: {'active' if row.get('conversation_id') else 'new'}"
+                       f"\nYOLO: {'enabled' if self.settings.yolo else 'disabled'}", thread)
+        elif cmd == "/new":
+            if active and active.session_key == key:
+                self._send(chat_id, "Stop the running task first.", thread)
             else:
-                self._models(user_id, chat_id, thread)
-        elif cmd == "/cancel":
-            # Backward-compatible emergency fallback; main UI uses Stop button.
-            with self._lock:
-                task = self._active
-            owner_task = (task is not None and task.owner == user_id
-                          and task.chat == chat_id and task.thread == thread)
-            self._reply(chat_id, "Stop requested." if owner_task and task.runner.cancel()
-                        else "No running task assigned to this chat.", thread)
+                self.sessions.reset(key)
+                self._send(chat_id, "New AGY conversation for this topic. Model preserved.", thread)
+        elif cmd in ("/model", "/models"):
+            if cmd == "/model" and arg.strip().lower() == "default":
+                if active and active.session_key == key:
+                    self._send(chat_id, "Stop the running task first.", thread)
+                else:
+                    self.sessions.change(key, model=None)
+                    with self._lock:
+                        self._picker = None
+                    self._send(chat_id, "Model: AGY default.", thread)
+            else:
+                self._models(user, chat_id, thread, key)
+        elif cmd == "/context":
+            row = self.sessions.get(key)
+            usage = row.get("last_usage", {})
+            if not isinstance(usage, dict) or not usage:
+                self._send(chat_id, "Context occupancy: unavailable from Headless JSON.\n"
+                           "No last-task token usage available.", thread)
+            else:
+                details = ", ".join(f"{k}: {v}" for k, v in sorted(usage.items()))
+                self._send(chat_id, "Context occupancy: unavailable from Headless JSON.\n"
+                           "Last completed task tokens (NOT context used %):\n" + details, thread)
+        elif cmd in ("/quota", "/usage"):
+            if active:
+                self._send(chat_id, "Quota query unavailable while an AGY task is active.", thread)
+            else:
+                threading.Thread(target=self._quota, args=(chat_id, thread),
+                                 daemon=True, name="agy-quota").start()
         elif text.startswith("/"):
-            self._reply(chat_id, "Unknown command. Try /help.", thread)
+            self._send(chat_id, "Unknown command. Try /help.", thread)
         elif len(text) > 4000:
-            self._reply(chat_id, "Prompt exceeds 4000 characters.", thread)
+            self._send(chat_id, "Prompt exceeds 4000 characters.", thread)
         else:
-            self._start_task(text, user_id, chat_id, thread)
+            self._start_task(text, user, chat_id, thread, key)
 
-    def _start_task(self, prompt: str, owner: int, chat: int,
-                    thread: int | None) -> None:
+    def _quota(self, chat: int, thread: int | None) -> None:
+        report = usage_report(self.settings.agy_command, self.settings.workspace)
+        self._send(chat, "AGY /usage:\n" + report if report else
+                   "AGY rate-limit report unavailable in this CLI environment.", thread)
+
+    def _models(self, user: int, chat: int, thread: int | None, key: str) -> None:
+        with self._lock:
+            busy = self._active is not None
+        if busy:
+            self._send(chat, "Model selection is unavailable during an active task.", thread)
+            return
+        options = list_models(self.settings.agy_command, self.settings.workspace)
+        if not options:
+            self._send(chat, "AGY models unavailable; check 'agy models' in Termux.", thread)
+            return
+        current = self.sessions.get(key).get("model")
+        buttons = [[{"text": ("✓ " if slug == current else "") + label[:45],
+                     "callback_data": f"model:{i}"}]
+                   for i, (slug, label) in enumerate(options)]
+        buttons.append([{"text": "AGY default", "callback_data": "model:default"}])
+        mid = self._send(chat, f"Current model: {current or 'AGY default'}\n"
+                         "Choose a model for this topic:", thread,
+                         {"inline_keyboard": buttons})
+        if mid:
+            with self._lock:
+                self._picker = Picker(user, chat, thread, mid, options)
+
+    def _start_task(self, prompt: str, user: int, chat: int,
+                    thread: int | None, key: str) -> None:
         with self._lock:
             if self._active is not None:
                 busy = True
             else:
                 busy = False
+                row = self.sessions.get(key)
                 runner = AgyRunner(self.settings.agy_command, self.settings.workspace,
-                                   self.settings.task_timeout_seconds)
-                task = Task(secrets.token_hex(8), owner, chat, thread,
-                            runner, self._model, time.monotonic())
-                worker = threading.Thread(target=self._execute, args=(task, prompt),
-                                          daemon=True, name="agy-task")
+                                   self.settings.task_timeout_seconds,
+                                   self.settings.print_timeout)
+                task = Task(secrets.token_hex(8), user, chat, thread, key, runner,
+                            row.get("model"), time.monotonic())
                 self._active = task
-                self._worker = worker
-                worker.start()
+                self._worker = threading.Thread(
+                    target=self._execute,
+                    args=(task, prompt, row.get("conversation_id")),
+                    daemon=True, name="agy-task")
+                self._worker.start()
         if busy:
-            self._reply(chat, "AGY is busy. Use the Stop button on the running task.",
-                        thread)
+            self._send(chat, "AGY is busy. Use Stop on the running task.", thread)
 
-    def _ticker(self, task: Task, done: threading.Event) -> None:
+    def _timer(self, task: Task, done: threading.Event) -> None:
         while not done.wait(5):
             with self._lock:
-                valid = self._active is task
-                message_id = task.message_id
-            if not valid or message_id is None:
-                return
-            self._edit(task.chat, message_id,
-                       task_status("⏳ Running", task.started_at, task.model),
-                       stop_keyboard(task.key))
+                if self._active is not task:
+                    return
+                mid = task.message_id
+                waiting = (self._pending is not None and
+                           self._pending.question.get("task") == task.key)
+            if mid is not None:
+                self._edit(task.chat, mid,
+                           status_text("❓ Waiting for Telegram answer" if waiting
+                                       else "⏳ Running", task.started, task.model),
+                           stop_keyboard(task.key))
 
-    def _execute(self, task: Task, prompt: str) -> None:
+    def _execute(self, task: Task, prompt: str, cid: str | None) -> None:
         done = threading.Event()
         ticker = None
         ok = False
-        message = "Task failed unexpectedly."
+        result_text = "Task failed unexpectedly."
         try:
-            mid = self._reply(task.chat,
-                              task_status("⏳ Running", task.started_at, task.model),
-                              task.thread, stop_keyboard(task.key))
+            mid = self._send(task.chat,
+                             status_text("⏳ Running", task.started, task.model),
+                             task.thread, stop_keyboard(task.key))
             with self._lock:
                 task.message_id = mid
             if mid is not None:
-                ticker = threading.Thread(target=self._ticker, args=(task, done),
+                ticker = threading.Thread(target=self._timer, args=(task, done),
                                           daemon=True, name="task-timer")
                 ticker.start()
-            outcome = task.runner.run(prompt, model=task.model)
-            ok, message = outcome.ok, outcome.message
+            self.bridge.begin(task.key, task.owner, task.chat, task.thread)
+            ask_hint = ("\n\nIf a user decision is required, use the "
+                        "telegram-ask MCP tool ask_telegram with a detailed question "
+                        "and described choices. Do not assume an answer.")
+            outcome = task.runner.run(prompt + ask_hint, model=task.model,
+                                      conversation_id=cid, yolo=self.settings.yolo)
+            ok, result_text = outcome.ok, outcome.message
+            if ok:
+                updates = {"last_usage": outcome.usage}
+                if outcome.conversation_id:
+                    updates["conversation_id"] = outcome.conversation_id
+                if outcome.actual_model:
+                    updates["last_actual_model"] = outcome.actual_model
+                self.sessions.change(task.session_key, **updates)
         except Exception:
-            message = "Task failed unexpectedly; no private details were shared."
+            result_text = "Task failed unexpectedly; no private details were shared."
         finally:
             done.set()
-            if ticker is not None:
+            if ticker:
                 ticker.join(timeout=12)
+            with self._lock:
+                self._pending = None
+            self.bridge.end(task.key)
             if task.message_id is not None:
-                state = "✅ Completed" if ok else ("🛑 Stopped" if
-                          task.runner._cancelled.is_set() else "❌ Failed")
+                label = "✅ Completed" if ok else (
+                    "🛑 Stopped" if task.runner._cancelled.is_set() else "❌ Failed")
                 self._edit(task.chat, task.message_id,
-                           task_status(state, task.started_at, task.model))
-            self._reply(task.chat, message if ok else "Task failed: " + message,
-                        task.thread)
+                           status_text(label, task.started, task.model))
+            self._send(task.chat, result_text if ok else "Task failed: " + result_text,
+                       task.thread)
             with self._lock:
                 if self._active is task:
-                    self._active = None
-                    self._worker = None
+                    self._active, self._worker = None, None
 
-    def _models(self, user: int, chat: int, thread: int | None) -> None:
+    def _poll_questions(self) -> None:
         with self._lock:
-            busy = self._active is not None
-        if busy:
-            self._reply(chat, "Finish the running task before changing models.", thread)
+            task = self._active
+            if self._pending is not None:
+                return
+        if task is None:
             return
-        models = list_models(self.settings.agy_command, self.settings.workspace)
-        if not models:
-            self._reply(chat, "Could not read AGY model list. Verify 'agy models' in Termux.",
-                        thread)
+        q = self.bridge.next_question(task.key)
+        if q is None:
             return
-        with self._lock:
-            current = self._model
-        keyboard = {
-            "inline_keyboard": [
-                [{"text": ("✓ " if slug == current else "") + name[:48],
-                  "callback_data": f"model:{index}"}]
-                for index, (slug, name) in enumerate(models)
-            ] + [[{"text": "AGY default", "callback_data": "model:default"}]]
-        }
-        msgid = self._reply(chat, "Choose AGY model for future tasks\n"
-                            f"Current: {current or 'AGY default'}", thread, keyboard)
-        with self._lock:
-            self._picker = Picker(user, chat, thread, msgid, models) if msgid else None
+        # Options require descriptions; include them in the question message.
+        lines = ["❓ " + str(q.get("question") or "")[:3500]]
+        opts = q.get("choices") or []
+        buttons = []
+        for i, item in enumerate(opts):
+            lines.append(f"{i + 1}. {item['label']}: {item['description']}")
+            buttons.append([{"text": item["label"][:45],
+                             "callback_data": f"ask:{q['id'][:16]}:{i}"}])
+        if opts:
+            lines.append("Or send a free-text answer.")
+        else:
+            lines.append("Reply with text in this chat/topic.")
+        mid = self._send(task.chat, "\n".join(lines), task.thread,
+                         {"inline_keyboard": buttons} if buttons else None)
+        if mid:
+            with self._lock:
+                if self._active is task:
+                    self._pending = Pending(q, mid)
+        else:
+            # Retry delivery; do not leave a question silently unanswerable.
+            retry = self.bridge.questions / (q["id"] + ".json")
+            sent = retry.with_suffix(".sent")
+            try:
+                sent.rename(retry)
+            except OSError:
+                pass
 
-    def _callback(self, query: dict) -> None:
-        sender, message = query.get("from"), query.get("message")
-        if not isinstance(sender, dict) or not isinstance(message, dict):
+    def _answer_question(self, pending: Pending, answer: str) -> None:
+        with self._lock:
+            if self._pending is not pending:
+                return
+            self._pending = None
+        self.bridge.answer(pending.question, answer)
+        self._edit(pending.question["chat"], pending.message_id,
+                   "✅ Answer received. AGY continues.")
+        self._send(pending.question["chat"], "Answer sent to AGY.",
+                   pending.question["topic"])
+
+    def _callback(self, cb: dict) -> None:
+        who, msg = cb.get("from"), cb.get("message")
+        if not isinstance(who, dict) or not isinstance(msg, dict):
             return
-        chat = message.get("chat")
+        chat = msg.get("chat")
         if not isinstance(chat, dict):
             return
-        uid, chat_id, mid = sender.get("id"), chat.get("id"), message.get("message_id")
-        if (type(uid) is not int or type(chat_id) is not int
-                or type(mid) is not int
-                or (uid, chat_id) not in self.settings.allowed_pairs):
+        uid, cid, mid = who.get("id"), chat.get("id"), msg.get("message_id")
+        if (type(uid) is not int or type(cid) is not int or type(mid) is not int
+                or (uid, cid) not in self.settings.allowed_pairs):
             return
-        qid, data = query.get("id"), query.get("data")
-        if not isinstance(qid, str) or not isinstance(data, str):
+        data, qid = cb.get("data"), cb.get("id")
+        if not isinstance(data, str) or not isinstance(qid, str):
             return
         if data.startswith("stop:"):
             with self._lock:
                 task = self._active
-                allowed = (task is not None and task.key == data[5:]
-                           and task.owner == uid and task.chat == chat_id
-                           and task.message_id == mid)
-            if allowed and task.runner.cancel():
-                self._answer(qid, "Stopping task…")
-            else:
-                self._answer(qid, "Task already finished or unavailable.")
+                valid = (task is not None and task.key == data[5:]
+                         and task.owner == uid and task.chat == cid
+                         and task.message_id == mid)
+            self._ack(qid, "Stopping…" if valid and task.runner.cancel()
+                      else "Task already finished.")
         elif data.startswith("model:"):
             with self._lock:
-                picker, busy = self._picker, self._active is not None
-                valid = (picker is not None and picker.owner == uid
-                         and picker.chat == chat_id and picker.message_id == mid)
-                if not valid or busy:
-                    selected = None
-                elif data == "model:default":
-                    selected = ""
+                picker = self._picker
+                busy = self._active is not None
+                valid = (picker is not None and picker.user == uid
+                         and picker.chat == cid and picker.message_id == mid)
+                if valid and not busy and data == "model:default":
+                    model = None
+                elif valid and not busy and data[6:].isascii() and data[6:].isdecimal():
+                    idx = int(data[6:])
+                    model = picker.options[idx][0] if idx < len(picker.options) else False
                 else:
-                    index = data[6:]
-                    idx = int(index) if index.isascii() and index.isdecimal() else -1
-                    selected = picker.models[idx][0] if 0 <= idx < len(picker.models) else None
-                if selected is not None:
-                    self._model = selected or None
-                    private_json(self._selected_path, {"model": self._model})
+                    model = False
+                if model is not False:
+                    self.sessions.change(scope(uid, cid, picker.thread), model=model)
                     self._picker = None
-            if selected is None:
-                self._answer(qid, "Model picker expired or task is running.")
+            if model is False:
+                self._ack(qid, "Model menu expired or task is running.")
             else:
-                self._answer(qid, "Model updated.")
-                self._edit(chat_id, mid,
-                           f"Model selected: {selected or 'AGY default'}")
+                self._ack(qid, "Model updated.")
+                self._edit(cid, mid, f"Model: {model or 'AGY default'}")
+        elif data.startswith("ask:"):
+            with self._lock:
+                pending, task = self._pending, self._active
+                fields = data.split(":")
+                valid = (pending is not None and task is not None
+                         and len(fields) == 3 and fields[1] == pending.question["id"][:16]
+                         and pending.message_id == mid and task.key == pending.question["task"]
+                         and uid == task.owner and cid == task.chat)
+                opts = pending.question["choices"] if valid else []
+                idx = int(fields[2]) if fields[-1].isascii() and fields[-1].isdecimal() else -1
+            if valid and 0 <= idx < len(opts):
+                self._answer_question(pending, opts[idx]["value"])
+                self._ack(qid, "Answer recorded.")
+            else:
+                self._ack(qid, "Question expired.")
 
     def run(self) -> None:
+        self.bridge.install(self.settings.workspace)
         offset = self.state.read()
         if offset is None:
-            last = self.api.get_updates(-1, timeout=0)
-            offset = max((u["update_id"] for u in last if
-                          isinstance(u.get("update_id"), int)), default=-1) + 1
+            stale = self.api.get_updates(-1, timeout=0)
+            offset = max((item["update_id"] for item in stale
+                          if type(item.get("update_id")) is int), default=-1) + 1
             self.state.write(offset)
-        print("Telegram polling started (AGY on demand; no inbound port).", flush=True)
+        print("Telegram polling started (AGY on demand).", flush=True)
         backoff = 2
         try:
             while not self._stop.is_set():
+                self._poll_questions()
                 try:
-                    updates = self.api.get_updates(offset)
+                    updates = self.api.get_updates(offset, timeout=3)
                     backoff = 2
                     for item in updates:
-                        if not isinstance(item, dict):
-                            continue
                         update_id = item.get("update_id")
                         if type(update_id) is not int or update_id < offset:
                             continue
@@ -345,6 +435,7 @@ class TelegramAgyBot:
                         finally:
                             offset = update_id + 1
                             self.state.write(offset)
+                    self._poll_questions()
                 except (TelegramError, OSError):
                     print("Telegram polling/network error; retrying.", flush=True)
                     self._stop.wait(backoff)
@@ -361,13 +452,9 @@ class TelegramAgyBot:
         self._stop.set()
 
 
-def stop_keyboard(key: str) -> dict:
-    return {"inline_keyboard": [[{"text": "🛑 Stop", "callback_data": "stop:" + key}]]}
-
-
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Android Termux Telegram ↔ AGY bridge")
-    parser.add_argument("--config", required=True, help="absolute path to private config")
+    parser = argparse.ArgumentParser(description="Termux Telegram ↔ AGY")
+    parser.add_argument("--config", required=True)
     args = parser.parse_args()
     try:
         settings = load_settings(args.config)
@@ -375,17 +462,16 @@ def main() -> int:
         print("Configuration error:", str(exc), flush=True)
         return 2
     bot = TelegramAgyBot(settings, TelegramAPI(settings.bot_token))
-    def terminate(_signum, _frame):
+    def terminate(_sig, _frame):
         bot.stop()
     signal.signal(signal.SIGTERM, terminate)
     signal.signal(signal.SIGINT, terminate)
     try:
         bot.run()
-    except TelegramError:
-        print("Telegram connection or token error during startup.", flush=True)
+    except (TelegramError, ValueError):
+        print("Bot startup failed: verify configuration and network.", flush=True)
         return 1
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())
