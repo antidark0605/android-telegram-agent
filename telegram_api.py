@@ -8,7 +8,13 @@ import urllib.request
 
 
 class TelegramError(RuntimeError):
-    """Deliberately never includes a URL, token, or Telegram response body."""
+    """Only safe categorical metadata; never include URL, token or response body."""
+
+    def __init__(self, message: str, *, kind: str = "unknown",
+                 http_status: int | None = None):
+        super().__init__(message)
+        self.kind = kind
+        self.http_status = http_status
 
 
 class TelegramAPI:
@@ -27,18 +33,19 @@ class TelegramAPI:
             with urllib.request.urlopen(req, timeout=timeout) as res:
                 raw = res.read(10_000_001)
         except urllib.error.HTTPError as exc:
-            raise TelegramError(f"Telegram API HTTP {exc.code}") from None
+            raise TelegramError("Telegram HTTP failure", kind="http", http_status=exc.code) from None
         except (urllib.error.URLError, TimeoutError, socket.timeout, OSError):
-            raise TelegramError("Telegram connection unavailable") from None
+            raise TelegramError("Telegram connection unavailable", kind="transport") from None
         if len(raw) > 10_000_000:
-            raise TelegramError("Telegram API response was too large")
+            raise TelegramError("Telegram API response was too large", kind="protocol")
         try:
             obj = json.loads(raw)
         except (ValueError, UnicodeDecodeError):
-            raise TelegramError("Invalid Telegram API response") from None
+            raise TelegramError("Invalid Telegram API response", kind="protocol") from None
         if not isinstance(obj, dict) or not obj.get("ok"):
             code = obj.get("error_code") if isinstance(obj, dict) else None
-            raise TelegramError(f"Telegram API rejected request ({code or 'unknown'})")
+            raise TelegramError("Telegram API rejected request", kind="api",
+                                http_status=code if type(code) is int else None)
         return obj.get("result")
 
     def get_updates(self, offset: int, timeout: int = 20) -> list[dict]:
@@ -46,7 +53,7 @@ class TelegramAPI:
             "offset": offset, "timeout": timeout, "allowed_updates": ["message", "callback_query"]
         }, timeout=timeout + 15)
         if not isinstance(result, list):
-            raise TelegramError("Telegram returned an invalid updates list")
+            raise TelegramError("Telegram returned an invalid updates list", kind="protocol")
         return result
 
     def send_text(self, chat_id: int, text: str, thread_id: int | None = None,
