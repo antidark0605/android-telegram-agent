@@ -435,6 +435,7 @@ class TelegramAgyBot:
             self._ack(qid, "Stopping…" if accepted
                       else "Task already finished.")
         elif data.startswith("model:"):
+            save_failed = False
             with self._lock:
                 picker = self._picker
                 busy = self._active is not None or self._auxiliary
@@ -459,7 +460,7 @@ class TelegramAgyBot:
                         self._picker = None
             if model is False:
                 self._ack(qid, "Model selection could not be saved."
-                          if locals().get("save_failed", False)
+                          if save_failed
                           else "Model menu expired or task is running.")
             else:
                 self._ack(qid, "Model updated.")
