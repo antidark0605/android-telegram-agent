@@ -1,6 +1,6 @@
 # One-pass Android AGY Telegram acceptance plan
 
-Revision: 2 (2026-10-13) — quota schema, session persistence, and failure handling.
+Revision: 3 (2026-10-13) — Telegram chat/user authorization and ID discovery.
 
 Run once against the same PR build in isolated non-root Termux. Preserve the existing running Bot; only one poller per Bot token. Do not publish secrets or raw private transcripts.
 
@@ -27,6 +27,9 @@ Run once against the same PR build in isolated non-root Termux. Preserve the exi
 | A19 | Simulate quota CLI status ERROR, SUCCESS with denied_actions, arbitrary response text, malformed numeric rate data | Every case displays unavailable; no arbitrary CLI response is forwarded to Telegram |
 | A20 | Simulate SessionStore.change/reset I/O failure and a corrupt persistent state file | No in-memory/disk divergence, corrupt state blocks startup, and no silent loss of the session mapping |
 | A21 | Let AGY return SUCCESS then fail session persistence | Telegram status and structured log mark task as failed; reply explains conversation continuity cannot be guaranteed, Bot returns idle |
+| A22 | Authorized /myid in private chat, group and Topic | Returns the caller's Telegram user/chat/type/thread IDs to the same chat/Topic, without disclosing allowlist entries or Token |
+| A23 | Unauthorized text, slash commands, model/Stop callbacks and Ask answers | Strict user/chat pair mismatch is silently denied; no AGY process, Session mutation or authorized inbound log |
+| A24 | Explicit allow_unlisted_myid bootstrap (fresh config may have no allowed_pairs) | Only /myid in sender's own 1:1 private chat is answered; unauthorized group/other commands cannot execute; disabling discovery restores deny-by-default |
 
 For each case report PASS/FAIL/NOT VERIFIED with a short anonymized diagnosis in the private feedback channel. Store real evidence only locally. Do not merge until blocking cases are reviewed.
 
