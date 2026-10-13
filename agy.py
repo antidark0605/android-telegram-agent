@@ -55,7 +55,7 @@ def parse_response(output: str) -> AgentResult:
     if not isinstance(cid, str) or not CONVERSATION_ID.fullmatch(cid):
         cid = None
     usage = result.get("usage")
-    model = result.get("model")
+    model = result.get("actual_model")
     return AgentResult(
         True, response.strip(), cid,
         {k: v for k, v in usage.items() if k in {
