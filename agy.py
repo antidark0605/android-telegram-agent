@@ -166,22 +166,62 @@ def list_models(command: str, workspace: Path) -> list[tuple[str, str]]:
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return []
 
+def _verified_limit_summary(document: dict) -> str | None:
+    """Render only numeric, schema-like quota fields, never free-form model text.
+
+    CLI variants may not emit rate_limits at all. In that case return None:
+    a valid AGY status is necessary but does not establish a rate-limit fact.
+    """
+    result = document.get("result")
+    if isinstance(result, dict):
+        document = result
+    limits = document.get("rate_limits")
+    if not isinstance(limits, dict):
+        return None
+    windows = (
+        ("five_hour", "5-hour"), ("5h", "5-hour"),
+        ("weekly", "Weekly"), ("7d", "Weekly"),
+        ("daily", "Daily"), ("24h", "Daily"),
+    )
+    seen: set[str] = set()
+    lines = []
+    for key, label in windows:
+        data = limits.get(key)
+        if not isinstance(data, dict) or label in seen:
+            continue
+        percent = data.get("remaining_percent")
+        # bool is not a percentage; reject strings and nonfinite numbers.
+        if type(percent) not in (int, float) or not 0 <= percent <= 100:
+            continue
+        line = f"{label}: {percent:g}% remaining"
+        seconds = data.get("reset_in_seconds")
+        if type(seconds) is int and 0 <= seconds <= 90 * 86400:
+            line += f", reset in {seconds // 60} min"
+        lines.append(line)
+        seen.add(label)
+    return "\n".join(lines) if lines else None
+
+
 def usage_report(command: str, workspace: Path) -> str | None:
-    """Standalone AGY built-in /usage report, not a made-up context percentage."""
+    """Verified AGY terminal status plus allowlisted numeric quota fields only.
+
+    A successful /usage *text response* is not by itself trusted quota data.
+    Until the installed CLI exposes a verified structured schema, fail closed.
+    """
     try:
         proc = subprocess.run([command, "-p", "/usage", "--output-format", "json",
                                "--print-timeout", "30s"],
                               cwd=str(workspace), stdin=subprocess.DEVNULL,
                               capture_output=True, text=True, timeout=45,
                               encoding="utf-8", errors="replace")
-        if proc.returncode or len(proc.stdout) > 100_000:
+        if proc.returncode != 0 or len(proc.stdout) > 100_000:
             return None
-        obj = json.loads(proc.stdout)
-        report = obj.get("response") if isinstance(obj, dict) else None
-        if not isinstance(report, str) or not report.strip():
+        terminal = parse_response(proc.stdout)
+        if not terminal.ok:
             return None
-        # Do not forward account emails, authorization strings, or file paths.
-        report = re.sub(r"[\w.+-]+@[\w.-]+\.\w+", "[account]", report)
-        return report.strip()[:2500]
+        document = json.loads(proc.stdout)
+        if not isinstance(document, dict):
+            return None
+        return _verified_limit_summary(document)
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return None
