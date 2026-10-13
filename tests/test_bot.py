@@ -47,6 +47,8 @@ class BotTests(unittest.TestCase):
         cfg = Settings("test-only", frozenset({(101, 202)}), "agy",
                        root, None, root / "private.json", True, "24h")
         self.bot = TelegramAgyBot(cfg, self.api)
+        from sessions import scope
+        self.bot.sessions.change(scope(101, 202, None), model="gemini-3.8-flash-high", started=True)
 
     def test_unauthorized_rejected(self):
         with patch("bot.AgyRunner") as runner:
@@ -88,16 +90,16 @@ class BotTests(unittest.TestCase):
             newcomer.handle_update(update("/myid", user=999, chat=999, is_bot=True))
             agent.assert_not_called()
         self.assertEqual(num_sent, len(self.api.sent))
-        self.assertFalse(newcomer.sessions.path.exists())
+        self.assertNotIn("999:999:main", newcomer.sessions.data)
         self.assertNotIn("inbound_authorized", newcomer.events.path.read_text())
 
     def test_foreign_model_callback_rejected(self):
         with patch("bot.list_models", return_value=[("gemini-3.8-flash-high", "Gemini")]):
-            self.bot.handle_update(update("/models"))
+            self.bot.handle_update(update("/model"))
         mid = len(self.api.sent)
         self.bot.handle_update(callback("model:0", mid, user=999))
         from sessions import scope
-        self.assertNotIn("model", self.bot.sessions.get(scope(101, 202, None)))
+        self.assertEqual(self.bot.sessions.get(scope(101, 202, None))["model"], "gemini-3.8-flash-high")
         self.assertFalse(self.api.acks)
 
     def test_help_status_and_legacy_cancel_disabled(self):
@@ -114,7 +116,10 @@ class BotTests(unittest.TestCase):
             ("gemini-3.8-flash-high", "Gemini Flash"),
             ("claude-sonnet-5-5-medium", "Claude Sonnet")
         ]):
-            self.bot.handle_update(update("/models", topic=2))
+            self.bot.handle_update(update("/model", topic=2))
+            keyboard = self.api.sent[-1][3]["inline_keyboard"]
+            self.assertEqual([len(row) for row in keyboard], [2])
+            self.assertEqual(keyboard[0][1]["callback_data"], "model:1")
             mid = len(self.api.sent)
             self.bot.handle_update(callback("model:1", mid))
         from sessions import scope
@@ -246,6 +251,111 @@ class BotTests(unittest.TestCase):
             worker = self.bot._worker
             if worker: worker.join(3)
             runner.return_value.run.assert_called_once()
+
+    def test_ls_fixed_argv_and_authorization(self):
+        with patch("bot.subprocess.run") as run:
+            run.return_value.returncode = 0
+            run.return_value.stdout = "total 4\n-rw------- 1 owner owner 3 sample.txt\n"
+            self.bot.handle_update(update("/ls", user=999))
+            run.assert_not_called()
+            self.bot.handle_update(update("/ls", topic=7))
+            self.assertEqual(run.call_args.args[0], ["ls", "-l", "--", str(self.bot.settings.workspace)])
+            self.assertNotIn("shell", run.call_args.kwargs)
+            self.assertEqual(self.api.sent[-1][2], 7)
+            self.assertIn("sample.txt", self.api.sent[-1][1])
+            self.bot.handle_update(update("/ls ; dangerous"))
+            self.assertEqual(run.call_count, 1)
+
+    def test_ls_timeout_failure_and_output_bound(self):
+        import subprocess
+        with patch("bot.subprocess.run", side_effect=subprocess.TimeoutExpired("ls", 5)):
+            self.bot.handle_update(update("/ls"))
+        self.assertIn("unavailable", self.api.sent[-1][1])
+        with patch("bot.subprocess.run") as run:
+            run.return_value.returncode = 1
+            self.bot.handle_update(update("/ls"))
+            self.assertIn("failed", self.api.sent[-1][1])
+            run.return_value.returncode = 0
+            run.return_value.stdout = "x" * 15000
+            self.bot.handle_update(update("/ls"))
+            self.assertIn("truncated", self.api.sent[-1][1])
+            self.assertLess(len(self.api.sent[-1][1]), 12100)
+
+    def test_status_native_id_cwd_and_model(self):
+        from sessions import scope
+        self.bot.sessions.change(scope(101, 202, 8), conversation_id="synthetic-conversation", model="example-medium")
+        self.bot.handle_update(update("/status", topic=8))
+        text = self.api.sent[-1][1]
+        self.assertIn("CWD: " + str(self.bot.settings.workspace), text)
+        self.assertIn("Native session ID: synthetic-conversation", text)
+        self.assertIn("Selected model: example-medium", text)
+        self.bot.handle_update(update("/status", topic=9))
+        self.assertIn("pending", self.api.sent[-1][1])
+
+    def test_removed_models_and_default_are_inert(self):
+        with patch("bot.list_models") as models:
+            self.bot.handle_update(update("/models"))
+            self.assertIn("Unknown command", self.api.sent[-1][1])
+            self.bot.handle_update(update("/model default"))
+            models.assert_not_called()
+        with patch("bot.list_models", return_value=[("example-high", "Example (High)")]):
+            self.bot.handle_update(update("/model", topic=5))
+        keyboard = self.api.sent[-1][3]["inline_keyboard"]
+        self.assertEqual([len(row) for row in keyboard], [1])
+        self.bot.handle_update(callback("model:default", len(self.api.sent)))
+        self.assertIn("expired", self.api.acks[-1][1])
+
+    def test_new_scope_requires_start_and_explicit_model(self):
+        from sessions import scope
+        with patch("bot.AgyRunner") as runner:
+            self.bot.handle_update(update("hello", topic=50))
+            self.assertIn("/session start", self.api.sent[-1][1])
+            self.bot.handle_update(update("/session start", topic=50))
+            self.assertTrue(self.bot.sessions.get(scope(101, 202, 50))["started"])
+            self.bot.handle_update(update("hello", topic=50))
+            self.assertIn("/model", self.api.sent[-1][1])
+            runner.assert_not_called()
+            self.bot.handle_update(update("/session start", topic=50))
+            self.assertIn("already", self.api.sent[-1][1])
+            self.bot.handle_update(update("/new", topic=50))
+            self.assertTrue(self.bot.sessions.get(scope(101, 202, 50))["started"])
+            self.bot.handle_update(update("hello", topic=51))
+            self.assertIn("/session start", self.api.sent[-1][1])
+
+    def test_session_start_storage_failure_is_closed(self):
+        with patch.object(self.bot.sessions, "change", side_effect=OSError):
+            self.bot.handle_update(update("/session start", topic=55))
+        self.assertIn("could not be saved", self.api.sent[-1][1])
+        with patch("bot.AgyRunner") as runner:
+            self.bot.handle_update(update("hello", topic=55))
+            runner.assert_not_called()
+
+    def test_global_fresh_text_and_unauthorized_commands_do_not_start(self):
+        from sessions import scope
+        # Fresh authorized global scope: selecting a model is not activation.
+        self.bot.sessions.change(scope(101, 202, None), started=False)
+        with patch("bot.AgyRunner") as runner, patch("bot.subprocess.run") as run:
+            self.bot.handle_update(update("new topic title"))
+            self.assertIn("/session start", self.api.sent[-1][1])
+            for cmd in ("/ls", "/status", "/session start", "/model"):
+                self.bot.handle_update(update(cmd, user=999))
+            runner.assert_not_called()
+            run.assert_not_called()
+        self.assertFalse(self.bot.sessions.get(scope(101, 202, None))["started"])
+
+    def test_saved_conversation_is_resumed_without_new_start(self):
+        from sessions import scope
+        self.bot.sessions.change(scope(101, 202, 60), model="example-high", conversation_id="existing-conversation")
+        with patch("bot.AgyRunner") as factory:
+            runner = factory.return_value
+            runner.run.return_value = AgentResult(True, "ok", "existing-conversation")
+            runner._cancelled.is_set.return_value = False
+            self.bot.handle_update(update("continue", topic=60))
+            worker = self.bot._worker
+            if worker:
+                worker.join(3)
+            self.assertEqual(runner.run.call_args.kwargs["conversation_id"], "existing-conversation")
+            self.assertEqual(runner.run.call_args.kwargs["model"], "example-high")
 
     def test_status_timer_text(self):
         self.assertIn("00:00", status_text("Running", __import__("time").monotonic(), None))

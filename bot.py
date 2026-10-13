@@ -4,6 +4,7 @@ import argparse
 import json
 import secrets
 import signal
+import subprocess
 import threading
 import time
 from dataclasses import dataclass
@@ -48,7 +49,7 @@ class Pending:
 
 def status_text(state: str, started: float, model: str | None) -> str:
     seconds = max(0, int(time.monotonic() - started))
-    return f"{state} · {seconds // 60:02d}:{seconds % 60:02d}\nModel: {model or 'AGY default'}"
+    return f"{state} · {seconds // 60:02d}:{seconds % 60:02d}\nModel: {model or 'not selected'}"
 
 
 def stop_keyboard(key: str) -> dict:
@@ -171,10 +172,12 @@ class TelegramAgyBot:
             return
         if cmd in ("/start", "/help"):
             self._send(chat_id, "AGY Telegram Agent\n"
-                       "Text: continue current topic conversation\n"
+                       "Text: continue an activated topic conversation\n"
+                       "/session start: activate this chat/topic\n"
                        "/myid: show your user/chat/topic IDs\n"
                        "/new: start new conversation in this topic\n"
-                       "/model, /models: choose model\n"
+                       "/model: choose an explicit model\n"
+                       "/ls: list workspace files (ls -l)\n"
                        "/status, /context, /quota: show status\n"
                        "Tap 🛑 Stop to interrupt running tasks.\n"
                        "No collaboration or kanban.", thread)
@@ -182,10 +185,25 @@ class TelegramAgyBot:
             row = self.sessions.get(key)
             text_out = (status_text("⏳ Running", active.started, active.model)
                         if active and active.session_key == key else "Idle")
-            self._send(chat_id, f"{text_out}\nSelected model: {row.get('model') or 'AGY default'}"
+            self._send(chat_id, f"{text_out}\nSelected model: {row.get('model') or 'not selected'}"
                        f"\nLast reported model: {row.get('last_actual_model') or 'not reported by AGY'}"
-                       f"\nSession: {'active' if row.get('conversation_id') else 'new'}"
+                       f"\nCWD: {self.settings.workspace}"
+                       f"\nNative session ID: {row.get('conversation_id') or 'pending (created on first task)'}"
                        f"\nYOLO: {'enabled' if self.settings.yolo else 'disabled'}", thread)
+        elif cmd == "/session":
+            if arg.strip().lower() != "start":
+                self._send(chat_id, "Use /session start in the intended chat/topic. CWD stays configured.", thread)
+            else:
+                row = self.sessions.get(key)
+                if row.get("started") is True or row.get("conversation_id"):
+                    self._send(chat_id, "This chat/topic already has an active session.", thread)
+                else:
+                    try:
+                        self.sessions.change(key, started=True)
+                    except (OSError, ValueError):
+                        self._send(chat_id, "Session activation could not be saved.", thread)
+                    else:
+                        self._send(chat_id, "Session activated for this chat/topic. Choose /model, then send a task.", thread)
         elif cmd == "/new":
             if active and active.session_key == key:
                 self._send(chat_id, "Stop the running task first.", thread)
@@ -198,23 +216,16 @@ class TelegramAgyBot:
                     self._send(chat_id, "Session reset could not be saved.", thread)
                 else:
                     self._send(chat_id, "New AGY conversation for this topic. Model preserved.", thread)
-        elif cmd in ("/model", "/models"):
-            if cmd == "/model" and arg.strip().lower() == "default":
-                if active and active.session_key == key:
-                    self._send(chat_id, "Stop the running task first.", thread)
-                else:
-                    try:
-                        self.sessions.change(key, model=None)
-                    except (OSError, ValueError):
-                        self.events.log("session_failed", kind="storage",
-                                        stage="session_write")
-                        self._send(chat_id, "Model selection could not be saved.", thread)
-                    else:
-                        with self._lock:
-                            self._picker = None
-                        self._send(chat_id, "Model: AGY default.", thread)
+        elif cmd == "/model":
+            if arg.strip():
+                self._send(chat_id, "Use /model and choose an explicit model.", thread)
             else:
                 self._models(user, chat_id, thread, key)
+        elif cmd == "/ls":
+            if arg.strip():
+                self._send(chat_id, "Use /ls without arguments: lists this workspace only.", thread)
+            else:
+                self._list_workspace(chat_id, thread)
         elif cmd == "/context":
             row = self.sessions.get(key)
             usage = row.get("last_usage", {})
@@ -242,6 +253,23 @@ class TelegramAgyBot:
         else:
             self._start_task(text, user, chat_id, thread, key)
 
+    def _list_workspace(self, chat: int, thread: int | None) -> None:
+        try:
+            result = subprocess.run(
+                ["ls", "-l", "--", str(self.settings.workspace)],
+                cwd=str(self.settings.workspace), stdin=subprocess.DEVNULL,
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=5, check=False)
+            if result.returncode != 0:
+                self._send(chat, "Workspace listing failed.", thread)
+                return
+            output = result.stdout
+            if len(output) > 12000:
+                output = output[:12000] + "\n[Listing truncated]"
+            self._send(chat, output or "Workspace listing is empty.", thread)
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            self._send(chat, "Workspace listing unavailable.", thread)
+
     def _quota(self, chat: int, thread: int | None) -> None:
         try:
             report = usage_report(self.settings.agy_command, self.settings.workspace)
@@ -262,11 +290,11 @@ class TelegramAgyBot:
             self._send(chat, "AGY models unavailable; check 'agy models' in Termux.", thread)
             return
         current = self.sessions.get(key).get("model")
-        buttons = [[{"text": ("✓ " if slug == current else "") + label[:45],
-                     "callback_data": f"model:{i}"}]
-                   for i, (slug, label) in enumerate(options)]
-        buttons.append([{"text": "AGY default", "callback_data": "model:default"}])
-        mid = self._send(chat, f"Current model: {current or 'AGY default'}\n"
+        model_buttons = [{"text": ("✓ " if slug == current else "") + label[:45],
+                          "callback_data": f"model:{i}"}
+                         for i, (slug, label) in enumerate(options)]
+        buttons = [model_buttons[i:i + 2] for i in range(0, len(model_buttons), 2)]
+        mid = self._send(chat, f"Current model: {current or 'not selected'}\n"
                          "Choose a model for this topic:", thread,
                          {"inline_keyboard": buttons})
         if mid:
@@ -281,6 +309,12 @@ class TelegramAgyBot:
             else:
                 busy = False
                 row = self.sessions.get(key)
+                if row.get("started") is not True and not row.get("conversation_id"):
+                    self._send(chat, "No active session. Use /session start in the intended chat/topic first.", thread)
+                    return
+                if not row.get("model"):
+                    self._send(chat, "Choose a model with /model before starting a task.", thread)
+                    return
                 runner = AgyRunner(self.settings.agy_command, self.settings.workspace,
                                    self.settings.task_timeout_seconds,
                                    self.settings.print_timeout)
@@ -458,9 +492,7 @@ class TelegramAgyBot:
                 busy = self._active is not None or self._auxiliary
                 valid = (picker is not None and picker.user == uid
                          and picker.chat == cid and picker.message_id == mid)
-                if valid and not busy and data == "model:default":
-                    model = None
-                elif valid and not busy and data[6:].isascii() and data[6:].isdecimal():
+                if valid and not busy and data[6:].isascii() and data[6:].isdecimal():
                     idx = int(data[6:])
                     model = picker.options[idx][0] if idx < len(picker.options) else False
                 else:
@@ -481,7 +513,7 @@ class TelegramAgyBot:
                           else "Model menu expired or task is running.")
             else:
                 self._ack(qid, "Model updated.")
-                self._edit(cid, mid, f"Model: {model or 'AGY default'}")
+                self._edit(cid, mid, f"Model: {model or 'not selected'}")
         elif data.startswith("ask:"):
             with self._lock:
                 pending, task = self._pending, self._active

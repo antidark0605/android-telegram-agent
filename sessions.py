@@ -61,6 +61,7 @@ class SessionStore:
         with self.lock:
             row = self.data.get(key, {})
             candidate = dict(self.data)
-            candidate[key] = {"model": row.get("model")}
+            candidate[key] = {"model": row.get("model"),
+                              "started": row.get("started") is True or bool(row.get("conversation_id"))}
             write_private(self.path, candidate)
             self.data = candidate

@@ -151,7 +151,7 @@ def parse_models(output: str) -> list[tuple[str, str]]:
     for line in output.splitlines():
         clean = re.sub(r"\x1b\[[0-9;]*m", "", line).strip()
         match = re.match(
-            r"^(?:[-*•]\s*)?([a-z][a-z0-9]*(?:-[a-z0-9.]+){1,8})\s{2,}(.+?)\s*$", clean)
+            r"^(?:[-*•]\s*)?([a-z][a-z0-9]*(?:-[a-z0-9.]+){1,8})(?:\t+| {2,})(.+?)\s*$", clean)
         if match and MODEL_SLUG.fullmatch(match[1]) and match[1] not in {m[0] for m in found}:
             found.append((match[1], match[2][:80]))
     return found[:40]

@@ -37,6 +37,12 @@ class ParserTests(unittest.TestCase):
                 self.assertFalse(result.ok)
                 self.assertNotIn("secret", result.message)
 
+    def test_model_parser_accepts_tab_delimited_rows(self):
+        parsed = parse_models("example-model-high\tExample Model (High)\n"
+                              "example-model-low\tExample Model (Low)")
+        self.assertEqual(parsed, [("example-model-high", "Example Model (High)"),
+                                  ("example-model-low", "Example Model (Low)")])
+
     def test_model_parser(self):
         parsed = parse_models("gemini-3.8-flash-high    Gemini 3.8 Flash High\n"
                               "claude-sonnet-5-5-medium   Claude Medium")
