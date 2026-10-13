@@ -12,6 +12,7 @@ from pathlib import Path
 from agy import AgyRunner, list_models, usage_report
 from ask_bridge import AskBridge
 from config import ConfigError, Settings, load_settings
+from diagnostics import EventLogger
 from sessions import SessionStore, scope, write_private
 from telegram_api import TelegramAPI, TelegramError
 
@@ -71,6 +72,7 @@ class OffsetStore:
 class TelegramAgyBot:
     def __init__(self, settings: Settings, api: TelegramAPI):
         self.settings, self.api = settings, api
+        self.events = EventLogger(settings.config_path.parent / 'events.jsonl')
         self.state = OffsetStore(settings.state_path)
         self.sessions = SessionStore(settings.config_path.parent / "sessions.json")
         self.bridge = AskBridge(settings.config_path.parent / "ask-bridge")
@@ -84,10 +86,14 @@ class TelegramAgyBot:
 
     def _send(self, chat: int, text: str, thread: int | None = None,
               markup: dict | None = None) -> int | None:
+        self.events.log("send_attempt", stage="send_message")
         try:
-            return self.api.send_text(chat, text, thread, reply_markup=markup)
-        except TelegramError:
-            print("Telegram send failed.", flush=True)
+            message_id = self.api.send_text(chat, text, thread, reply_markup=markup)
+            self.events.log("send_ok", stage="send_message")
+            return message_id
+        except TelegramError as exc:
+            self.events.log("send_failed", stage="send_message", kind=exc.kind,
+                            http_status=exc.http_status)
             return None
 
     def _edit(self, chat: int, message_id: int, text: str,
@@ -95,14 +101,17 @@ class TelegramAgyBot:
         try:
             self.api.edit_text(chat, message_id, text, markup)
             return True
-        except TelegramError:
+        except TelegramError as exc:
+            self.events.log("edit_failed", stage="edit_message", kind=exc.kind,
+                            http_status=exc.http_status)
             return False
 
     def _ack(self, query_id: str, text: str = "") -> None:
         try:
             self.api.answer_callback(query_id, text)
-        except TelegramError:
-            pass
+        except TelegramError as exc:
+            self.events.log("callback_failed", stage="answer_callback", kind=exc.kind,
+                            http_status=exc.http_status)
 
     def handle_update(self, update: dict) -> None:
         if isinstance(update.get("callback_query"), dict):
@@ -125,6 +134,7 @@ class TelegramAgyBot:
         if not isinstance(content, str) or not content.strip():
             return
         text = content.strip()
+        self.events.log("inbound_authorized", kind="message")
         key = scope(user, chat_id, thread)
         cmd, _, arg = text.partition(" ")
         cmd = cmd.split("@", 1)[0].lower()
@@ -242,6 +252,7 @@ class TelegramAgyBot:
                 task = Task(secrets.token_hex(8), user, chat, thread, key, runner,
                             row.get("model"), time.monotonic())
                 self._active = task
+                self.events.log("task_started", stage="agy")
                 self._worker = threading.Thread(
                     target=self._execute,
                     args=(task, prompt, row.get("conversation_id")),
@@ -309,6 +320,10 @@ class TelegramAgyBot:
                            status_text(label, task.started, task.model))
             self._send(task.chat, result_text if ok else "Task failed: " + result_text,
                        task.thread)
+            task_kind = ("success" if ok else
+                         "stopped" if task.runner._cancelled.is_set() else "failed")
+            self.events.log("task_finished", kind=task_kind, stage="agy",
+                            elapsed_ms=int((time.monotonic() - task.started) * 1000))
             with self._lock:
                 if self._active is task:
                     self._active, self._worker = None, None
@@ -375,13 +390,20 @@ class TelegramAgyBot:
         data, qid = cb.get("data"), cb.get("id")
         if not isinstance(data, str) or not isinstance(qid, str):
             return
+        action = "stop" if data.startswith("stop:") else (
+            "model" if data.startswith("model:") else
+            "ask" if data.startswith("ask:") else "other")
+        self.events.log("callback_authorized", kind=action)
         if data.startswith("stop:"):
             with self._lock:
                 task = self._active
                 valid = (task is not None and task.key == data[5:]
                          and task.owner == uid and task.chat == cid
                          and task.message_id == mid)
-            self._ack(qid, "Stopping…" if valid and task.runner.cancel()
+            accepted = bool(valid and task.runner.cancel())
+            if accepted:
+                self.events.log("task_stop_requested", stage="agy")
+            self._ack(qid, "Stopping…" if accepted
                       else "Task already finished.")
         elif data.startswith("model:"):
             with self._lock:
@@ -422,35 +444,66 @@ class TelegramAgyBot:
 
     def run(self) -> None:
         self.bridge.install(self.settings.workspace)
+        self.events.log("bot_started", stage="startup")
         offset = self.state.read()
         if offset is None:
             stale = self.api.get_updates(-1, timeout=0)
             offset = max((item["update_id"] for item in stale
                           if type(item.get("update_id")) is int), default=-1) + 1
-            self.state.write(offset)
+            try:
+                self.state.write(offset)
+            except OSError:
+                self.events.log("offset_failed", kind="storage", stage="startup")
+                raise
         print("Telegram polling started (AGY on demand).", flush=True)
         backoff = 2
+        last_heartbeat = 0.0
         try:
             while not self._stop.is_set():
                 self._poll_questions()
                 try:
                     updates = self.api.get_updates(offset, timeout=3)
-                    backoff = 2
-                    for item in updates:
-                        update_id = item.get("update_id")
-                        if type(update_id) is not int or update_id < offset:
-                            continue
-                        try:
-                            self.handle_update(item)
-                        finally:
-                            offset = update_id + 1
-                            self.state.write(offset)
-                    self._poll_questions()
-                except (TelegramError, OSError):
-                    print("Telegram polling/network error; retrying.", flush=True)
+                except TelegramError as exc:
+                    self.events.log("poll_failed", kind=exc.kind, stage="get_updates",
+                                    http_status=exc.http_status, retry_s=backoff)
                     self._stop.wait(backoff)
                     backoff = min(backoff * 2, 30)
+                    continue
+                except OSError:
+                    self.events.log("poll_failed", kind="transport", stage="get_updates",
+                                    retry_s=backoff)
+                    self._stop.wait(backoff)
+                    backoff = min(backoff * 2, 30)
+                    continue
+                now = time.monotonic()
+                if updates or now - last_heartbeat >= 60:
+                    self.events.log("poll_ok", stage="get_updates", count=len(updates))
+                    last_heartbeat = now
+                backoff = 2
+                for item in updates:
+                    if not isinstance(item, dict):
+                        continue
+                    update_id = item.get("update_id")
+                    if type(update_id) is not int or update_id < offset:
+                        continue
+                    try:
+                        self.handle_update(item)
+                    except (OSError, ValueError, TypeError):
+                        self.events.log("handler_failed", kind="unknown",
+                                        stage="process_update")
+                    finally:
+                        offset = update_id + 1
+                        try:
+                            self.state.write(offset)
+                        except OSError:
+                            # Failing closed avoids replaying side-effecting
+                            # requests indefinitely when offset storage breaks.
+                            self.events.log("offset_failed", kind="storage",
+                                            stage="offset_write")
+                            raise
+                self._poll_questions()
         finally:
+            self.events.log("bot_stopped", stage="shutdown")
             with self._lock:
                 task, worker = self._active, self._worker
             if task:
@@ -478,8 +531,8 @@ def main() -> int:
     signal.signal(signal.SIGINT, terminate)
     try:
         bot.run()
-    except (TelegramError, ValueError):
-        print("Bot startup failed: verify configuration and network.", flush=True)
+    except (TelegramError, ValueError, OSError):
+        print("Bot stopped: inspect private diagnostic events and configuration.", flush=True)
         return 1
     return 0
 
