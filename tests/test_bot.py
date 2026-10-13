@@ -154,6 +154,35 @@ class BotTests(unittest.TestCase):
         self.assertTrue(any("model result" in item[1] for item in self.api.sent))
         self.assertIsNone(self.bot._active)
 
+    def test_successful_agy_but_failed_session_save_is_not_marked_complete(self):
+        with patch("bot.AgyRunner") as factory:
+            runner = factory.return_value
+            runner.run.return_value = AgentResult(
+                True, "synthetic model answer", "12345678-aaaa",
+                {"input_tokens": 11})
+            runner._cancelled.is_set.return_value = False
+            with patch.object(self.bot.sessions, "change", side_effect=OSError):
+                self.bot.handle_update(update("test question"))
+                worker = self.bot._worker
+                if worker:
+                    worker.join(3)
+        self.assertFalse(any("✅ Completed" in edit[2] for edit in self.api.edits))
+        self.assertTrue(any("❌ Failed" in edit[2] for edit in self.api.edits))
+        self.assertTrue(any("session state could not be saved" in item[1]
+                            for item in self.api.sent))
+        from sessions import scope
+        self.assertNotIn("conversation_id",
+                         self.bot.sessions.get(scope(101, 202, None)))
+        lines = self.bot.events.path.read_text(encoding="utf8").splitlines()
+        self.assertTrue(any('"event":"session_failed"' in line for line in lines))
+        self.assertTrue(any('"kind":"failed"' in line for line in lines))
+        self.assertIsNone(self.bot._active)
+
+    def test_session_reset_failure_is_reported(self):
+        with patch.object(self.bot.sessions, "reset", side_effect=OSError):
+            self.bot.handle_update(update("/new"))
+        self.assertIn("could not be saved", self.api.sent[-1][1])
+
     def test_busy_only_one_process(self):
         entered, exit_now = threading.Event(), threading.Event()
         def slow_run(*args, **kwargs):
