@@ -2,7 +2,7 @@
 
 Small non-root **Termux + Telegram + official AGY CLI** Bot for Android. Original Python standard-library code, not a port of another private codebase. No root, inbound ports, OpenClaw, collaboration, kanban, server framework, or pip dependencies.
 
-**Platform baseline:** non-root Android 9 / ARM64, Termux 0.118.3, Python 3.14.6 and AGY 1.3.3 have been independently exercised. The original one-shot Telegram ↔ AGY text round trip passed on a real device. New session/MCP/button features require separate device acceptance testing.
+**Validation scope:** The basic Telegram ↔ AGY text round trip has been exercised in a non-root Termux environment. The integrated session, MCP and interactive controls require separate acceptance testing. Device-specific test environments, identifiers and results are intentionally kept outside this public repository.
 
 ## Telegram UX
 
