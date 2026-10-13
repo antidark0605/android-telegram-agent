@@ -7,5 +7,6 @@
   "workspace": "YOUR_PRIVATE_WORKSPACE_PATH",
   "task_timeout_seconds": null,
   "print_timeout": "24h",
-  "yolo": false
+  "yolo": false,
+  "allow_unlisted_myid": false
 }
