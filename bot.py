@@ -457,7 +457,7 @@ class TelegramAgyBot:
                 raise
         print("Telegram polling started (AGY on demand).", flush=True)
         backoff = 2
-        last_heartbeat = 0.0
+        last_heartbeat = time.monotonic() - 60.0
         try:
             while not self._stop.is_set():
                 self._poll_questions()
