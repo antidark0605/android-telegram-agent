@@ -173,17 +173,29 @@ class TelegramAgyBot:
             if active and active.session_key == key:
                 self._send(chat_id, "Stop the running task first.", thread)
             else:
-                self.sessions.reset(key)
-                self._send(chat_id, "New AGY conversation for this topic. Model preserved.", thread)
+                try:
+                    self.sessions.reset(key)
+                except (OSError, ValueError):
+                    self.events.log("session_failed", kind="storage",
+                                    stage="session_write")
+                    self._send(chat_id, "Session reset could not be saved.", thread)
+                else:
+                    self._send(chat_id, "New AGY conversation for this topic. Model preserved.", thread)
         elif cmd in ("/model", "/models"):
             if cmd == "/model" and arg.strip().lower() == "default":
                 if active and active.session_key == key:
                     self._send(chat_id, "Stop the running task first.", thread)
                 else:
-                    self.sessions.change(key, model=None)
-                    with self._lock:
-                        self._picker = None
-                    self._send(chat_id, "Model: AGY default.", thread)
+                    try:
+                        self.sessions.change(key, model=None)
+                    except (OSError, ValueError):
+                        self.events.log("session_failed", kind="storage",
+                                        stage="session_write")
+                        self._send(chat_id, "Model selection could not be saved.", thread)
+                    else:
+                        with self._lock:
+                            self._picker = None
+                        self._send(chat_id, "Model: AGY default.", thread)
             else:
                 self._models(user, chat_id, thread, key)
         elif cmd == "/context":
@@ -309,8 +321,19 @@ class TelegramAgyBot:
                     updates["conversation_id"] = outcome.conversation_id
                 if outcome.actual_model:
                     updates["last_actual_model"] = outcome.actual_model
-                self.sessions.change(task.session_key, **updates)
+                try:
+                    self.sessions.change(task.session_key, **updates)
+                except (OSError, ValueError):
+                    # AGY may have completed, but the next turn cannot safely
+                    # rely on unsaved conversation metadata. Do not mark green.
+                    self.events.log("session_failed", kind="storage",
+                                    stage="session_write")
+                    ok = False
+                    result_text = ("AGY answered, but session state could not be saved. "
+                                   "Conversation continuity is not guaranteed.\n\n"
+                                   + outcome.message)
         except Exception:
+            ok = False
             result_text = "Task failed unexpectedly; no private details were shared."
         finally:
             done.set()
@@ -425,10 +448,19 @@ class TelegramAgyBot:
                 else:
                     model = False
                 if model is not False:
-                    self.sessions.change(scope(uid, cid, picker.thread), model=model)
-                    self._picker = None
+                    try:
+                        self.sessions.change(scope(uid, cid, picker.thread), model=model)
+                    except (OSError, ValueError):
+                        self.events.log("session_failed", kind="storage",
+                                        stage="session_write")
+                        model = False
+                        save_failed = True
+                    else:
+                        self._picker = None
             if model is False:
-                self._ack(qid, "Model menu expired or task is running.")
+                self._ack(qid, "Model selection could not be saved."
+                          if locals().get("save_failed", False)
+                          else "Model menu expired or task is running.")
             else:
                 self._ack(qid, "Model updated.")
                 self._edit(cid, mid, f"Model: {model or 'AGY default'}")
