@@ -112,12 +112,50 @@ class AgyRunnerTests(unittest.TestCase):
         self.assertEqual(choices[0][0], "gemini-3.8-flash-high")
         self.assertEqual(call.call_args.args[0], ["agy", "models"])
 
-    def test_usage_report_and_unavailable(self):
-        value = '{"status":"SUCCESS","response":"Remaining 80% reset in 3h"}'
-        proc = MagicMock(returncode=0, stdout=value)
+    def test_usage_report_allows_only_numeric_quota_schema(self):
+        data = {
+            "status": "SUCCESS", "response": "Free text is never sent to Telegram",
+            "rate_limits": {
+                "five_hour": {"remaining_percent": 80, "reset_in_seconds": 3600,
+                              "account_email": "never-export@example.test"},
+                "weekly": {"remaining_percent": 12.5, "reset_in_seconds": 1800},
+                "unexpected": {"secret": "never-export"},
+            },
+        }
+        proc = MagicMock(returncode=0, stdout=json.dumps(data))
         with patch("agy.subprocess.run", return_value=proc):
-            self.assertIn("80%", usage_report("agy", Path("/tmp")))
-        proc.returncode = 1
+            report = usage_report("agy", Path("/tmp"))
+        self.assertEqual(report,
+                         "5-hour: 80% remaining, reset in 60 min\\n"
+                         "Weekly: 12.5% remaining, reset in 30 min".replace("\\n", "\n"))
+        self.assertNotIn("never-export", report)
+
+    def test_usage_report_rejects_failed_denied_and_unstructured_results(self):
+        variants = [
+            {"status": "ERROR", "response": "Looks like a quota: 99%",
+             "rate_limits": {"five_hour": {"remaining_percent": 99}}},
+            {"status": "SUCCESS", "response": "Not authorized",
+             "denied_actions": [{"action": "command"}],
+             "rate_limits": {"five_hour": {"remaining_percent": 99}}},
+            {"status": "SUCCESS", "response": "Remaining 80% reset in 3h"},
+            {"response": "Remaining 80%"},
+            {"status": "SUCCESS", "response": "ok",
+             "rate_limits": {"weekly": {"remaining_percent": "90%"}}},
+            {"status": "SUCCESS", "response": "ok",
+             "rate_limits": {"weekly": {"remaining_percent": True}}},
+            {"status": "SUCCESS", "response": "ok",
+             "rate_limits": {"weekly": {"remaining_percent": 109}}},
+        ]
+        for data in variants:
+            with self.subTest(data=data):
+                proc = MagicMock(returncode=0, stdout=json.dumps(data))
+                with patch("agy.subprocess.run", return_value=proc):
+                    self.assertIsNone(usage_report("agy", Path("/tmp")))
+
+    def test_usage_report_requires_success_exit(self):
+        proc = MagicMock(returncode=1,
+                         stdout='{"status":"SUCCESS","response":"ok",'
+                                '"rate_limits":{"weekly":{"remaining_percent":50}}}')
         with patch("agy.subprocess.run", return_value=proc):
             self.assertIsNone(usage_report("agy", Path("/tmp")))
 
