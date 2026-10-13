@@ -22,6 +22,7 @@ class Settings:
     config_path: Path
     yolo: bool = False
     print_timeout: str = "24h"
+    allow_unlisted_myid: bool = False
 
     @property
     def state_path(self) -> Path:
@@ -65,9 +66,13 @@ def load_settings(filename: str | Path) -> Settings:
     if (not isinstance(token, str) or len(token) < 12
             or token.startswith("YOUR_") or any(ch.isspace() for ch in token)):
         raise ConfigError("bot_token must be a real, nonempty Telegram token")
+    discover_ids = raw.get("allow_unlisted_myid", False)
+    if type(discover_ids) is not bool:
+        raise ConfigError("allow_unlisted_myid must be a boolean")
     pairs = raw.get("allowed_pairs")
-    if not isinstance(pairs, list) or not pairs:
-        raise ConfigError("allowed_pairs must contain at least one user/chat pair")
+    if not isinstance(pairs, list) or (not pairs and not discover_ids):
+        raise ConfigError("allowed_pairs must contain an authorized user/chat pair "
+                          "(or enable private-chat ID discovery for initial setup)")
     allowed: set[tuple[int, int]] = set()
     for item in pairs:
         if not isinstance(item, dict):
@@ -104,4 +109,4 @@ def load_settings(filename: str | Path) -> Settings:
     if (not isinstance(print_timeout, str)
             or not __import__("re").fullmatch(r"[1-9][0-9]{0,4}[smh]", print_timeout)):
         raise ConfigError("print_timeout must be a positive duration like 24h")
-    return Settings(token, frozenset(allowed), command, work, timeout, path, yolo, print_timeout)
+    return Settings(token, frozenset(allowed), command, work, timeout, path, yolo, print_timeout, discover_ids)
