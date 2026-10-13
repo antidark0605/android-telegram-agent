@@ -41,6 +41,25 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(c.allowed_pairs, {(101, -202)})
         self.assertEqual(c.task_timeout_seconds, 40)
 
+    def test_myid_bootstrap_is_explicit_boolean(self):
+        self.data["allowed_pairs"] = []
+        self._write()
+        with self.assertRaises(ConfigError):
+            load_settings(self.conf)
+        self.data["allow_unlisted_myid"] = True
+        self._write()
+        settings = load_settings(self.conf)
+        self.assertEqual(settings.allowed_pairs, frozenset())
+        self.assertTrue(settings.allow_unlisted_myid)
+        self.data["allow_unlisted_myid"] = "true"
+        self._write()
+        with self.assertRaises(ConfigError):
+            load_settings(self.conf)
+
+    def test_myid_bootstrap_disabled_by_default(self):
+        self._write()
+        self.assertFalse(load_settings(self.conf).allow_unlisted_myid)
+
     def test_symlinked_config_rejected(self):
         self._write()
         link = self.conf.parent / "alias.json"
