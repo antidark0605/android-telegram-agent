@@ -9,8 +9,9 @@ from bot import Task, TelegramAgyBot, status_text, stop_keyboard
 from config import Settings
 
 
-def update(text, user=101, chat=202, topic=None):
-    msg = {"from": {"id": user}, "chat": {"id": chat}, "text": text}
+def update(text, user=101, chat=202, topic=None, chat_type="private", is_bot=False):
+    msg = {"from": {"id": user, "is_bot": is_bot},
+           "chat": {"id": chat, "type": chat_type}, "text": text}
     if topic is not None:
         msg["message_thread_id"] = topic
     return {"update_id": 9, "message": msg}
@@ -53,6 +54,51 @@ class BotTests(unittest.TestCase):
             self.bot.handle_update(update("hello", chat=999))
             runner.assert_not_called()
         self.assertEqual(self.api.sent, [])
+
+    def test_myid_authorized_and_topic(self):
+        self.bot.handle_update(update("/myid"))
+        self.assertIn("chat_id: 202", self.api.sent[-1][1])
+        self.assertIn("user_id: 101", self.api.sent[-1][1])
+        self.assertIn("thread_id: none", self.api.sent[-1][1])
+        self.bot.handle_update(update("/myid@SomeBot", topic=19, chat_type="supergroup"))
+        self.assertIn("chat_type: supergroup", self.api.sent[-1][1])
+        self.assertIn("thread_id: 19", self.api.sent[-1][1])
+        self.assertEqual(self.api.sent[-1][2], 19)
+
+    def test_myid_default_rejects_unlisted_and_bot(self):
+        self.bot.handle_update(update("/myid", user=999, chat=999))
+        self.bot.handle_update(update("/myid", user=999, chat=-999, chat_type="supergroup"))
+        self.bot.handle_update(update("/myid", is_bot=True))
+        self.assertEqual(self.api.sent, [])
+
+    def test_myid_opt_in_bootstrap_only_own_private_chat(self):
+        from dataclasses import replace
+        cfg = replace(self.bot.settings, allowed_pairs=frozenset(),
+                      allow_unlisted_myid=True)
+        newcomer = TelegramAgyBot(cfg, self.api)
+        with patch("bot.AgyRunner") as agent:
+            newcomer.handle_update(update("/myid", user=999, chat=999))
+            self.assertIn("user_id: 999", self.api.sent[-1][1])
+            num_sent = len(self.api.sent)
+            newcomer.handle_update(update("/help", user=999, chat=999))
+            newcomer.handle_update(update("AGY task", user=999, chat=999))
+            newcomer.handle_update(update("/myid", user=999, chat=-999,
+                                          chat_type="supergroup"))
+            newcomer.handle_update(update("/myid", user=999, chat=888))
+            newcomer.handle_update(update("/myid", user=999, chat=999, is_bot=True))
+            agent.assert_not_called()
+        self.assertEqual(num_sent, len(self.api.sent))
+        self.assertFalse(newcomer.sessions.path.exists())
+        self.assertFalse(newcomer.events.path.exists())
+
+    def test_foreign_model_callback_rejected(self):
+        with patch("bot.list_models", return_value=[("gemini-3.8-flash-high", "Gemini")]):
+            self.bot.handle_update(update("/models"))
+        mid = len(self.api.sent)
+        self.bot.handle_update(callback("model:0", mid, user=999))
+        from sessions import scope
+        self.assertNotIn("model", self.bot.sessions.get(scope(101, 202, None)))
+        self.assertFalse(self.api.acks)
 
     def test_help_status_and_legacy_cancel_disabled(self):
         with patch("bot.AgyRunner") as runner:
