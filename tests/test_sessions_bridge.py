@@ -27,6 +27,30 @@ class SessionTests(unittest.TestCase):
             self.assertNotIn("conversation_id", s.get(one))
 
 
+    def test_transactional_session_state(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "state.json"
+            store = SessionStore(path)
+            key = scope(1, 2, 3)
+            store.change(key, conversation_id="existing-session")
+            initial = path.read_bytes()
+            with patch("sessions.write_private", side_effect=OSError):
+                with self.assertRaises(OSError):
+                    store.change(key, conversation_id="new-session")
+                with self.assertRaises(OSError):
+                    store.reset(key)
+            self.assertEqual(store.get(key)["conversation_id"], "existing-session")
+            self.assertEqual(path.read_bytes(), initial)
+            self.assertEqual(SessionStore(path).get(key)["conversation_id"],
+                             "existing-session")
+
+    def test_corrupt_state_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "state.json"
+            path.write_text("invalid-json")
+            with self.assertRaises(ValueError):
+                SessionStore(path)
+
 class BridgeTests(unittest.TestCase):
     def test_local_mcp_config_created_without_global_change(self):
         with tempfile.TemporaryDirectory() as td:
