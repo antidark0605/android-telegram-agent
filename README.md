@@ -20,9 +20,9 @@ Small non-root **Termux + Telegram + official AGY CLI** Bot for Android. Origina
 
 Each task sends one `⏳ Running · MM:SS` status message with 🛑 Stop, edited around every five seconds, and a separate final answer. Stop is tied to the authorized user, chat, exact status-message ID and unique task key. Once finished, the button is removed. One AGY process at a time prevents memory spikes on small devices.
 
-**Topics:** The private chat (no Topic) has its own default Session. Each Telegram `message_thread_id` has a separate AGY conversation ID, Model selection and last task token accounting. A new Topic does not require creating another Bot Token. `/new` resets only the current Topic. Restarting the Bot preserves its Session mappings in a private JSON file.
+**Topics:** The private chat (no Topic) has its own default Session. Each Telegram `message_thread_id` has a separate AGY conversation ID, Model selection and last task token accounting. A new Topic does not require creating another Bot Token. `/new` resets only the current Topic. Restarting the Bot preserves its Session mappings in a private JSON file. Invalid/corrupted state stops startup rather than silently erasing conversations; a failed persistence operation never updates the in-memory mapping.
 
-**Model identification:** `/status` displays the configured or selected model, not a guessed effective model. Models selected through Telegram are passed as AGY's `--model` argument to the *next* run; an active task cannot change its model. If the JSON result includes an `actual_model` field, the Bot saves that separately. AGY's default actual model is not always reported by Headless JSON.
+**Model identification:** `/status` displays the configured or selected model, not a guessed effective model. Models selected through Telegram are passed as AGY's `--model` argument to the *next* run; an active task cannot change its model. If a validated AGY JSON result explicitly provides an `actual_model` field, the Bot saves it separately; without one it displays **not reported**. AGY's default actual model is not always reported by Headless JSON.
 
 ### Ask Telegram
 
@@ -51,7 +51,10 @@ git clone https://github.com/antidark0605/android-telegram-agent.git
 cd android-telegram-agent
 mkdir -p "$HOME/telegram-agent-workspace" "$HOME/.config/android-telegram-agent"
 chmod 700 "$HOME/telegram-agent-workspace" "$HOME/.config/android-telegram-agent"
-cp config.example.json "$HOME/.config/android-telegram-agent/config.json"
+# Only initialize a new installation; never overwrite an existing private config.
+if [ ! -e "$HOME/.config/android-telegram-agent/config.json" ]; then
+  cp config.example.json "$HOME/.config/android-telegram-agent/config.json"
+fi
 chmod 600 "$HOME/.config/android-telegram-agent/config.json"
 ```
 
@@ -108,7 +111,7 @@ tail -n 80 "$HOME/.config/android-telegram-agent/events.jsonl"
 
 The AGY JSON result has `usage.input_tokens`, `usage.output_tokens` and related token totals. These measure task processing, including possible multiple model calls; they **do not** represent current context occupancy. `/context` therefore shows only verifiable last-task counters and explicitly marks Context occupancy **unavailable** unless an independently verified live context source is added.
 
-`/quota` makes a standalone `agy -p "/usage" --output-format json` call and shows the CLI-provided report if the current version supports it. Reports are optional, and errors display "unavailable" rather than guessing limits. It does not require `llm-quota`, OAuth scraping or account credential access.
+`/quota` calls standalone `agy -p "/usage" --output-format json`, requires a verified SUCCESS terminal result without permission denials, and only renders **allowlisted structured numeric** remaining percentages/reset durations (such as `rate_limits.five_hour.remaining_percent`) if the CLI exposes them. Arbitrary model-generated text is **never forwarded** as an account/quota report. Unknown real-device CLI schemas intentionally display **unavailable** until verified and explicitly adapted; this is more limited than a fully implemented quota dashboard. It does not require `llm-quota`, OAuth scraping or account credential access.
 
 ## Tests and acceptance
 
