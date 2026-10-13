@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from access import TelegramAccess, identity_reply
 from agy import AgyRunner, list_models, usage_report
 from ask_bridge import AskBridge
 from config import ConfigError, Settings, load_settings
@@ -78,6 +79,7 @@ class OffsetStore:
 class TelegramAgyBot:
     def __init__(self, settings: Settings, api: TelegramAPI):
         self.settings, self.api = settings, api
+        self.access = TelegramAccess(settings.allowed_pairs, settings.allow_unlisted_myid)
         self.events = EventLogger(settings.config_path.parent / 'events.jsonl')
         self.state = OffsetStore(settings.state_path)
         self.sessions = SessionStore(settings.config_path.parent / "sessions.json")
@@ -130,9 +132,8 @@ class TelegramAgyBot:
         if not isinstance(sender, dict) or not isinstance(chat, dict):
             return
         user, chat_id = sender.get("id"), chat.get("id")
-        if (type(user) is not int or type(chat_id) is not int
-                or (user, chat_id) not in self.settings.allowed_pairs):
-            return
+        if sender.get("is_bot") is True:
+            return  # Do not process bot-originated messages or bootstrap IDs.
         thread = message.get("message_thread_id")
         if type(thread) is not int:
             thread = None
@@ -140,10 +141,25 @@ class TelegramAgyBot:
         if not isinstance(content, str) or not content.strip():
             return
         text = content.strip()
-        self.events.log("inbound_authorized", kind="message")
-        key = scope(user, chat_id, thread)
         cmd, _, arg = text.partition(" ")
         cmd = cmd.split("@", 1)[0].lower()
+        authorized = self.access.is_allowed(user, chat_id)
+        if cmd == "/myid":
+            if not self.access.may_discover_ids(
+                user, chat_id, chat.get("type"), sender.get("is_bot", False)
+            ):
+                return
+            if authorized:
+                self.events.log("inbound_authorized", kind="message")
+            chat_type = chat.get("type")
+            if chat_type not in ("private", "group", "supergroup", "channel"):
+                chat_type = "unknown"
+            self._send(chat_id, identity_reply(user, chat_id, chat_type, thread), thread)
+            return
+        if not authorized:
+            return  # Nothing, including AGY/Ask/commands, for unlisted pairs.
+        self.events.log("inbound_authorized", kind="message")
+        key = scope(user, chat_id, thread)
         with self._lock:
             pending = self._pending
             active = self._active
@@ -156,6 +172,7 @@ class TelegramAgyBot:
         if cmd in ("/start", "/help"):
             self._send(chat_id, "AGY Telegram Agent\n"
                        "Text: continue current topic conversation\n"
+                       "/myid: show your user/chat/topic IDs\n"
                        "/new: start new conversation in this topic\n"
                        "/model, /models: choose model\n"
                        "/status, /context, /quota: show status\n"
@@ -413,8 +430,8 @@ class TelegramAgyBot:
         if not isinstance(chat, dict):
             return
         uid, cid, mid = who.get("id"), chat.get("id"), msg.get("message_id")
-        if (type(uid) is not int or type(cid) is not int or type(mid) is not int
-                or (uid, cid) not in self.settings.allowed_pairs):
+        if (type(mid) is not int or not self.access.is_allowed(uid, cid)
+                or who.get("is_bot") is True):
             return
         data, qid = cb.get("data"), cb.get("id")
         if not isinstance(data, str) or not isinstance(qid, str):
