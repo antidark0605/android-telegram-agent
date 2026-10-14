@@ -138,7 +138,7 @@ class RichTests(unittest.TestCase):
                 self.assertLessEqual(max(map(len, parts)), 65536)
                 payload = b"".join(parts)
                 self.assertEqual(int(req.headers["Content-length"]), len(payload))
-                self.assertIn(b'"media":"attach://upload0"', payload)
+                self.assertTrue(b'"media": "attach://upload0"' in payload)
                 self.assertIn(b"tg://photo?id=media0", payload)
                 observed.append((req.full_url, payload))
                 return Response()
