@@ -112,15 +112,21 @@ class TelegramAgyBot:
         self.events.log("send_attempt", stage="send_message")
         try:
             if hasattr(self.api, "send_rich"):
-                self.api.send_rich(chat, cleaned, thread, artifacts=media)
+                message_id = self.api.send_rich(chat, cleaned, thread, artifacts=media)
             else:
                 # Simple in-memory test transports may only implement send_text.
-                self.api.send_text(chat, cleaned, thread)
+                message_id = self.api.send_text(chat, cleaned, thread)
+            if type(message_id) is not int:
+                raise TelegramError("Telegram did not confirm a message id",
+                                    kind="protocol")
             self.events.log("send_ok", stage="send_message")
             return True
         except TelegramError as exc:
             self.events.log("send_failed", stage="send_message", kind=exc.kind,
                             http_status=exc.http_status)
+            return False
+        except (OSError, ValueError):
+            self.events.log("send_failed", stage="send_message", kind="storage")
             return False
 
     def _edit(self, chat: int, message_id: int, text: str,
@@ -422,15 +428,16 @@ class TelegramAgyBot:
             with self._lock:
                 self._pending = None
             self.bridge.end(task.key)
+            delivered = self._send_output(task.chat, result_text, task.thread) if ok else True
+            if not ok:
+                self._send(task.chat, "Task failed: " + result_text, task.thread)
             if task.message_id is not None:
-                label = "✅ Completed" if ok else (
-                    "🛑 Stopped" if task.runner._cancelled.is_set() else "❌ Failed")
+                label = ("✅ Completed" if ok and delivered else
+                         "⚠️ Delivery unconfirmed" if ok else
+                         "🛑 Stopped" if task.runner._cancelled.is_set()
+                         else "❌ Failed")
                 self._edit(task.chat, task.message_id,
                            status_text(label, task.started, task.model))
-            if ok:
-                self._send_output(task.chat, result_text, task.thread)
-            else:
-                self._send(task.chat, "Task failed: " + result_text, task.thread)
             task_kind = ("success" if ok else
                          "stopped" if task.runner._cancelled.is_set() else "failed")
             self.events.log("task_finished", kind=task_kind, stage="agy",
