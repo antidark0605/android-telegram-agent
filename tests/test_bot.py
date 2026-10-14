@@ -241,6 +241,33 @@ class BotTests(unittest.TestCase):
             self.bot.handle_update(update("/new"))
         self.assertIn("could not be saved", self.api.sent[-1][1])
 
+    def test_agent_final_answer_declared_artifact_is_delivered_only_to_topic(self):
+        from sessions import scope
+        topic = 44
+        self.bot.sessions.change(scope(101, 202, topic),
+                                 model="gemini-3.8-flash-high", started=True)
+        root = self.bot.settings.workspace
+        folder = root / "artifacts"
+        folder.mkdir(exist_ok=True)
+        (folder / "result.txt").write_text("synthetic artifact")
+        output = '## Answer\n\n**中文**\nTAGW_MEDIA: {"path":"artifacts/result.txt"}\n'
+        with patch("bot.AgyRunner") as factory:
+            factory.return_value.run.return_value = AgentResult(
+                True, output, "12345678-abc0", {})
+            factory.return_value._cancelled.is_set.return_value = False
+            self.bot.handle_update(update("prepare a file", topic=topic))
+            worker = self.bot._worker
+            if worker:
+                worker.join(timeout=4)
+        self.assertTrue(self.api.rich_sent)
+        chat, message, thread, media = self.api.rich_sent[-1]
+        self.assertEqual((chat, thread), (202, topic))
+        self.assertIn("**中文**", message)
+        self.assertNotIn("TAGW_MEDIA", message)
+        self.assertEqual(len(media), 1)
+        self.assertEqual(media[0].filename, "result.txt")
+        self.assertIsNone(self.bot._active)
+
     def test_busy_only_one_process(self):
         entered, exit_now = threading.Event(), threading.Event()
         def slow_run(*args, **kwargs):

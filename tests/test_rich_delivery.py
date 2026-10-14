@@ -118,6 +118,47 @@ class RichTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 b"".join(_stream_payload(before, [("upload0", assets[0])]))
 
+    def test_real_multipart_request_is_bounded_and_topic_scoped(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "artifacts").mkdir()
+            (root / "artifacts" / "diagram.png").write_bytes(b"X" * 160000)
+            _, media = extract_artifacts(
+                'TAGW_MEDIA: {"path":"artifacts/diagram.png"}', root)
+            observed = []
+            class Response:
+                def __enter__(self):
+                    return self
+                def __exit__(self, *_args):
+                    return False
+                def read(self, _limit):
+                    return b'{"ok":true,"result":{"message_id":55}}'
+            def fake_open(req, timeout=90):
+                parts = list(req.data)
+                self.assertLessEqual(max(map(len, parts)), 65536)
+                payload = b"".join(parts)
+                self.assertEqual(int(req.headers["Content-length"]), len(payload))
+                self.assertIn(b'"media":"attach://upload0"', payload)
+                self.assertIn(b"tg://photo?id=media0", payload)
+                observed.append((req.full_url, payload))
+                return Response()
+            with patch("rich_delivery.urllib.request.urlopen", side_effect=fake_open):
+                self.assertEqual(self.send.send(7, 21, "## Diagram", media), 55)
+            self.assertEqual(len(observed), 1)
+            self.assertTrue(observed[0][0].endswith("/sendRichMessage"))
+
+    def test_no_symlinked_artifact_root(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            real = root / "safe"
+            real.mkdir()
+            (real / "secret.txt").write_text("fake secret")
+            (root / "artifacts").symlink_to(real, target_is_directory=True)
+            rendered, files = extract_artifacts(
+                'TAGW_MEDIA: {"path":"artifacts/secret.txt"}', root)
+            self.assertEqual(files, [])
+            self.assertIn("omitted", rendered)
+
     def test_rich_media_schema_and_standard_media_fallback(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
