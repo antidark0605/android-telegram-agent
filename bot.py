@@ -105,6 +105,24 @@ class TelegramAgyBot:
                             http_status=exc.http_status)
             return None
 
+    def _send_output(self, chat: int, text: str, thread: int | None = None) -> bool:
+        """Post an AGY answer as Rich Markdown with verified artifacts."""
+        from artifacts import extract_artifacts
+        cleaned, media = extract_artifacts(text, self.settings.workspace)
+        self.events.log("send_attempt", stage="send_message")
+        try:
+            if hasattr(self.api, "send_rich"):
+                self.api.send_rich(chat, cleaned, thread, artifacts=media)
+            else:
+                # Simple in-memory test transports may only implement send_text.
+                self.api.send_text(chat, cleaned, thread)
+            self.events.log("send_ok", stage="send_message")
+            return True
+        except TelegramError as exc:
+            self.events.log("send_failed", stage="send_message", kind=exc.kind,
+                            http_status=exc.http_status)
+            return False
+
     def _edit(self, chat: int, message_id: int, text: str,
               markup: dict | None = None) -> bool:
         try:
@@ -362,7 +380,12 @@ class TelegramAgyBot:
             self.bridge.begin(task.key, task.owner, task.chat, task.thread)
             ask_hint = ("\n\nIf a user decision is required, use the "
                         "telegram-ask MCP tool ask_telegram with a detailed question "
-                        "and described choices. Do not assume an answer.")
+                        "and described choices. Do not assume an answer. "
+                        "If you create files for the user, save them under the "
+                        "workspace artifacts/ directory, then include a standalone "
+                        "line in your final response: "
+                        'TAGW_MEDIA: {"path":"artifacts/example.pdf","kind":"auto"}. '
+                        "Never declare private files outside artifacts/.")
             outcome = task.runner.run(prompt + ask_hint, model=task.model,
                                       conversation_id=cid, yolo=self.settings.yolo)
             ok, result_text = outcome.ok, outcome.message
@@ -398,8 +421,10 @@ class TelegramAgyBot:
                     "🛑 Stopped" if task.runner._cancelled.is_set() else "❌ Failed")
                 self._edit(task.chat, task.message_id,
                            status_text(label, task.started, task.model))
-            self._send(task.chat, result_text if ok else "Task failed: " + result_text,
-                       task.thread)
+            if ok:
+                self._send_output(task.chat, result_text, task.thread)
+            else:
+                self._send(task.chat, "Task failed: " + result_text, task.thread)
             task_kind = ("success" if ok else
                          "stopped" if task.runner._cancelled.is_set() else "failed")
             self.events.log("task_finished", kind=task_kind, stage="agy",

@@ -73,6 +73,12 @@ class TelegramAPI:
                 first_id = mid if isinstance(mid, int) else None
         return first_id
 
+    def send_rich(self, chat_id: int, markdown: str, thread_id: int | None = None,
+                  artifacts=None) -> int | None:
+        """Deliver formatted Markdown and optionally stream declared media."""
+        from rich_delivery import RichDelivery
+        return RichDelivery(self).send(chat_id, thread_id, markdown, artifacts)
+
     def edit_text(self, chat_id: int, message_id: int, text: str,
                   reply_markup: dict | None = None) -> None:
         self._call("editMessageText", {
