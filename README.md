@@ -164,7 +164,7 @@ quota buckets provide numeric remaining fractions and timezone-aware reset
 times; model-written response text is not used. Quota family selection uses
 the current topic's selected model, and unknown families display unavailable.
 The same cached provider supplies final-answer footers. See Response identity
-and quota footer below for the cache, timeout, and timestamp rules.
+and quota footer below for the cache and timeout rules.
 
 
 ## Tests and acceptance
@@ -198,8 +198,8 @@ Original project code: MIT. Telegram, Termux and AGY are separate software with 
 Final answers show the task's **selected AGY model**, followed by a Usage
 blockquote. Official `agy -p /usage --output-format json` data supplies
 5-hour and weekly remaining percentages and reset times for recognized
-Gemini or Claude/GPT quota buckets. The snapshot includes a check timestamp
-(UTC+08:00); responses within 60 seconds can reuse a snapshot marked cached.
+Gemini or Claude/GPT quota buckets. Responses within 60 seconds can reuse a
+snapshot marked cached; the check timestamp is not displayed.
 Quota lookup runs after AGY finishes, uses a 45-second timeout, and failures
 show unavailable without discarding the answer. Unknown schemas and model
 families are not guessed. Context occupancy remains unavailable: ordinary
@@ -212,3 +212,22 @@ command payload; it is not parsed as a model-written quota answer.
 Response headers and Usage footers retain a blank spacer paragraph around the
 answer. Each Usage row is a separate quotation paragraph so Rich Markdown does
 not fold soft line breaks into one continuous sentence.
+
+## Incoming photos
+
+Revision 5 — 2026-10-14. Send a Telegram photo with an optional caption after
+activating the chat/topic and selecting a model. Without a caption, the agent
+is asked to describe the photo. The largest available photo variant is fetched
+using Telegram `getFile`, saved inside the workspace with owner-only access,
+and passed to AGY as an explicit image path. The temporary image is removed
+after the task, including failure. Forced termination or a filesystem error
+can leave private files for manual cleanup; `incoming-images/` is Git-ignored.
+Stop is checked between download reads; an in-progress network read can wait
+up to its 30-second socket timeout. Downloads are limited to 10 MiB and PNG/JPEG.
+Unlisted senders and busy or unactivated sessions cannot initiate downloads.
+Only Telegram photo messages are supported; image documents and album grouping
+are not implemented. Send one photo per task. Earlier ignored photos are not
+replayed. A compatible AGY version and image-capable selected model are required.
+
+References: [Telegram getFile](https://core.telegram.org/bots/api#getfile),
+[AGY print-mode image example](https://github.com/google-antigravity/antigravity-cli/issues/735).

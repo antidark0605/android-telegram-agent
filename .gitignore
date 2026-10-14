@@ -16,6 +16,7 @@ session-state/
 logs/
 evidence/
 artifacts/
+incoming-images/
 *.log
 *.apk
 *.tar.gz

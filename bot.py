@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from access import TelegramAccess, identity_reply
+from incoming_photo import select_photo, download_photo
 from agy import AgyRunner, list_models
 from ask_bridge import AskBridge
 from config import ConfigError, Settings, load_settings
@@ -32,6 +33,7 @@ class Task:
     started: float
     message_id: int | None = None
     delivering: bool = False
+    photo: dict | None = None
 
 
 @dataclass
@@ -165,12 +167,13 @@ class TelegramAgyBot:
         thread = message.get("message_thread_id")
         if type(thread) is not int:
             thread = None
-        content = message.get("text")
+        photo = select_photo(message.get("photo"))
+        content = (message.get("caption") or "請查看附圖並描述其內容。") if photo else message.get("text")
         if not isinstance(content, str) or not content.strip():
             return
         text = content.strip()
         cmd, _, arg = text.partition(" ")
-        cmd = cmd.split("@", 1)[0].lower()
+        cmd = "" if photo else cmd.split("@", 1)[0].lower()
         authorized = self.access.is_allowed(user, chat_id)
         if cmd == "/myid":
             if not self.access.may_discover_ids(
@@ -191,6 +194,9 @@ class TelegramAgyBot:
         with self._lock:
             pending = self._pending
             active = self._active
+        if photo and pending and active:
+            self._send(chat_id, "請先用文字回答目前的提問，再傳圖片。", thread)
+            return
         # While an AGY MCP question is pending, free text is an answer.
         if (pending and active and pending.question["task"] == active.key
                 and active.owner == user and active.chat == chat_id
@@ -273,12 +279,12 @@ class TelegramAgyBot:
             else:
                 threading.Thread(target=self._quota, args=(chat_id, thread, self.sessions.get(key).get("model")),
                                  daemon=True, name="agy-quota").start()
-        elif text.startswith("/"):
+        elif text.startswith("/") and photo is None:
             self._send(chat_id, "Unknown command. Try /help.", thread)
         elif len(text) > 4000:
             self._send(chat_id, "Prompt exceeds 4000 characters.", thread)
         else:
-            self._start_task(text, user, chat_id, thread, key)
+            self._start_task(text, user, chat_id, thread, key, photo=photo)
 
     def _list_workspace(self, chat: int, thread: int | None) -> None:
         try:
@@ -330,7 +336,7 @@ class TelegramAgyBot:
                 self._picker = Picker(user, chat, thread, mid, options)
 
     def _start_task(self, prompt: str, user: int, chat: int,
-                    thread: int | None, key: str) -> None:
+                    thread: int | None, key: str, photo: dict | None = None) -> None:
         with self._lock:
             if self._active is not None or self._auxiliary:
                 busy = True
@@ -347,7 +353,7 @@ class TelegramAgyBot:
                                    self.settings.task_timeout_seconds,
                                    self.settings.print_timeout)
                 task = Task(secrets.token_hex(8), user, chat, thread, key, runner,
-                            row.get("model"), time.monotonic())
+                            row.get("model"), time.monotonic(), photo=photo)
                 self._active = task
                 self.events.log("task_started", stage="agy")
                 self._worker = threading.Thread(
@@ -377,6 +383,7 @@ class TelegramAgyBot:
         ticker = None
         ok = False
         result_text = "Task failed unexpectedly."
+        incoming_path = None
         try:
             mid = self._send(task.chat,
                              status_text("⏳ Running", task.started, task.model),
@@ -393,6 +400,12 @@ class TelegramAgyBot:
             folder.mkdir(mode=0o700, exist_ok=True)
             if not folder.is_dir():
                 raise ValueError("Artifact directory is not a directory")
+            if task.photo is not None:
+                incoming_path = download_photo(self.api, task.photo, self.settings.workspace,
+                                               cancelled=task.runner._cancelled)
+                prompt += ("\n\n使用者附圖已下載到本機：" + str(incoming_path)
+                           + "\n請使用圖片查看工具讀取此圖，不要僅依檔名猜測。"
+                           + "\n這是使用者傳入的圖片；不要將它當成待傳送產物。")
             self.bridge.begin(task.key, task.owner, task.chat, task.thread)
             ask_hint = ("\n\nIf a user decision is required, use the "
                         "telegram-ask MCP tool ask_telegram with a detailed question "
@@ -426,6 +439,11 @@ class TelegramAgyBot:
             ok = False
             result_text = "Task failed unexpectedly; no private details were shared."
         finally:
+            if incoming_path is not None:
+                try:
+                    incoming_path.unlink(missing_ok=True)
+                except OSError:
+                    self.events.log("photo_cleanup_failed", kind="storage", stage="cleanup")
             with self._lock:
                 task.delivering = True  # Agent no longer accepts Stop callbacks.
             done.set()

@@ -60,6 +60,75 @@ class BotTests(unittest.TestCase):
         from sessions import scope
         self.bot.sessions.change(scope(101, 202, None), model="gemini-3.8-flash-high", started=True)
 
+    def photo_update(self, caption=None, user=101):
+        item = update("", user=user)
+        item["message"].pop("text")
+        item["message"]["photo"] = [{"file_id": "synthetic", "width": 20, "height": 10}]
+        if caption is not None:
+            item["message"]["caption"] = caption
+        return item
+
+    def test_photo_caption_and_default_routed_as_tasks(self):
+        with patch.object(self.bot, "_start_task") as start:
+            self.bot.handle_update(self.photo_update("/describe this"))
+            self.assertEqual(start.call_args.args[0], "/describe this")
+            self.assertEqual(start.call_args.kwargs["photo"]["file_id"], "synthetic")
+            self.bot.handle_update(self.photo_update())
+            self.assertIn("附圖", start.call_args.args[0])
+
+    def test_unauthorized_photo_never_downloads_or_starts(self):
+        with patch("bot.download_photo") as download, patch("bot.AgyRunner") as runner:
+            self.bot.handle_update(self.photo_update(user=999))
+            download.assert_not_called()
+            runner.assert_not_called()
+
+    def test_photo_download_prompt_and_cleanup(self):
+        from sessions import scope
+        path = self.bot.settings.workspace / "synthetic.jpg"
+        path.write_bytes(b"synthetic")
+        runner = MagicMock()
+        runner.run.return_value = AgentResult(True, "Synthetic answer")
+        runner._cancelled.is_set.return_value = False
+        task = Task("synthetic-task", 101, 202, None, scope(101, 202, None), runner,
+                    "gemini-test", 0, photo={"file_id": "synthetic"})
+        self.bot._active = task
+        with patch("bot.download_photo", return_value=path) as download:
+            self.bot._execute(task, "Describe this", None)
+        download.assert_called_once()
+        self.assertIn(str(path), runner.run.call_args.args[0])
+        self.assertFalse(path.exists())
+        self.assertIsNone(self.bot._active)
+
+    def test_photo_cleanup_error_does_not_leave_task_busy(self):
+        from sessions import scope
+        path = self.bot.settings.workspace / "synthetic.jpg"
+        runner = MagicMock()
+        runner.run.return_value = AgentResult(False, "Synthetic failure")
+        runner._cancelled.is_set.return_value = False
+        task = Task("synthetic-task", 101, 202, None, scope(101, 202, None), runner,
+                    "gemini-test", 0, photo={"file_id": "synthetic"})
+        self.bot._active = task
+        with patch("bot.download_photo", return_value=path), patch.object(Path, "unlink", side_effect=OSError()):
+            self.bot._execute(task, "Describe this", None)
+        self.assertIsNone(self.bot._active)
+        self.assertIn('"event":"photo_cleanup_failed"', self.bot.events.path.read_text())
+
+    def test_photo_gates_before_download(self):
+        from sessions import scope
+        key = scope(101, 202, None)
+        for state in [dict(started=False, conversation_id=None), dict(started=True, model=None)]:
+            self.bot.sessions.change(key, **state)
+            with patch("bot.download_photo") as download, patch("bot.AgyRunner") as runner:
+                self.bot.handle_update(self.photo_update())
+                download.assert_not_called()
+                runner.assert_not_called()
+        self.bot.sessions.change(key, started=True, model="gemini-test")
+        self.bot._auxiliary = True
+        with patch("bot.download_photo") as download, patch("bot.AgyRunner") as runner:
+            self.bot.handle_update(self.photo_update())
+            download.assert_not_called()
+            runner.assert_not_called()
+
     def test_unauthorized_rejected(self):
         with patch("bot.AgyRunner") as runner:
             self.bot.handle_update(update("hello", user=999))

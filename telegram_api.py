@@ -20,6 +20,7 @@ class TelegramError(RuntimeError):
 class TelegramAPI:
     def __init__(self, token: str):
         self._base = "https://api.telegram.org/bot" + token + "/"
+        self._file_base = "https://api.telegram.org/file/bot" + token + "/"
 
     def _call(self, method: str, payload: dict, timeout: int = 40):
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")

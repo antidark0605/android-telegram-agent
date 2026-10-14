@@ -86,7 +86,7 @@ class QuotaService:
 def format_usage(model, data, at, cached=False):
     prefix = ('gemini' if isinstance(model, str) and model.startswith('gemini-') else
               '3p' if isinstance(model, str) and model.startswith(('claude-', 'gpt-')) else None)
-    lines = ['📊 **Usage**', 'Context: unavailable']
+    lines = ['📊 **Usage**' + (' · cached' if cached else ''), 'Context: unavailable']
     for suffix, label in [('5h', '5h'), ('weekly', 'Weekly')]:
         row = data.get(prefix + '-' + suffix) if prefix else None
         if row is None:
@@ -95,8 +95,6 @@ def format_usage(model, data, at, cached=False):
             left = row['left']
             reset = row['reset'].astimezone(LOCAL_TIMEZONE)
             lines.append(f'{label}: {100-left:.1f}% used · {left:.1f}% left · resets {reset:%m/%d %H:%M}')
-    if data and at is not None:
-        lines.append(f'Quota checked: {at:%m/%d %H:%M:%S} UTC+08:00' + (' · cached' if cached else ''))
     # Separate quote paragraphs: soft Markdown line breaks are folded by Telegram.
     return '\n>\n'.join('> ' + line for line in lines)
 

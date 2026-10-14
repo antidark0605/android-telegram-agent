@@ -79,6 +79,7 @@ class UsageTests(unittest.TestCase):
         self.assertIn('Selected model: `gemini-test`',message)
         self.assertIn(text,message)
         self.assertIn('5h: unavailable',message)
+        self.assertNotIn('Quota checked',message)
 
 
     def test_visible_gaps_and_quote_paragraph_boundaries(self):
@@ -88,7 +89,7 @@ class UsageTests(unittest.TestCase):
         self.assertIn('`gemini-test`\n\n\u00a0\n\nSynthetic body',message)
         self.assertIn('Synthetic body\n\n\u00a0\n\n> 📊',message)
         footer=format_usage('gemini-test', data, at)
-        self.assertEqual(len(footer.split('\n>\n')),5)
+        self.assertEqual(len(footer.split('\n>\n')),4)
         self.assertIn('> Context: unavailable\n>\n> 5h:',footer)
 
 
