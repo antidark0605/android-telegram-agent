@@ -69,7 +69,7 @@ def download_photo(api, photo, workspace: Path, cancelled=None) -> Path:
                     prefix = b''
                     while True:
                         check_running()
-                        block = response.read(min(65536, MAX_PHOTO_BYTES + 1 - total))
+                        block = response.read1(min(65536, MAX_PHOTO_BYTES + 1 - total))
                         if not block:
                             break
                         total += len(block)

@@ -32,6 +32,17 @@ class PhotoTests(unittest.TestCase):
             download_photo(self.api, self.photo, self.root, cancelled=stop)
         self.api._call.assert_not_called()
 
+    def test_short_network_reads_preserve_header(self):
+        class ShortReads(io.BytesIO):
+            def read1(self, n):
+                return super().read(min(1, n))
+        data = b"\x89PNG\r\n\x1a\nsynthetic"
+        self.api._call.return_value = {"file_path": "photos/a.png", "file_size": len(data)}
+        with patch("incoming_photo.urllib.request.urlopen", return_value=ShortReads(data)):
+            path = download_photo(self.api, self.photo, self.root)
+        self.assertEqual(path.read_bytes(), data)
+        self.assertEqual(path.suffix, ".png")
+
     def test_largest_valid_variant(self):
         large = dict(self.photo, width=100)
         self.assertIs(select_photo([{}, self.photo, large, dict(large, width=True)]), large)
