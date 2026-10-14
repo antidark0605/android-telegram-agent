@@ -1,6 +1,6 @@
 # android-telegram-agent
 
-Revision: 2 — 2026-10-13
+Revision: 3 — 2026-10-14
 
 Small non-root **Termux + Telegram + official AGY CLI** Bot for Android. Original Python standard-library code, not a port of another private codebase. No root, inbound ports, OpenClaw, collaboration, kanban, server framework, or pip dependencies.
 
@@ -158,7 +158,14 @@ tail -n 80 "$HOME/.config/android-telegram-agent/events.jsonl"
 
 The AGY JSON result has `usage.input_tokens`, `usage.output_tokens` and related token totals. These measure task processing, including possible multiple model calls; they **do not** represent current context occupancy. `/context` therefore shows only verifiable last-task counters and explicitly marks Context occupancy **unavailable** unless an independently verified live context source is added.
 
-`/quota` calls standalone `agy -p "/usage" --output-format json`, requires a verified SUCCESS terminal result without permission denials, and only renders **allowlisted structured numeric** remaining percentages/reset durations (such as `rate_limits.five_hour.remaining_percent`) if the CLI exposes them. Arbitrary model-generated text is **never forwarded** as an account/quota report. Unknown real-device CLI schemas intentionally display **unavailable** until verified and explicitly adapted; this is more limited than a fully implemented quota dashboard. It does not require `llm-quota`, OAuth scraping or account credential access.
+`/quota` calls standalone `agy -p "/usage" --output-format json` and
+accepts only a successful official `command.name=usage` payload. Recognized
+quota buckets provide numeric remaining fractions and timezone-aware reset
+times; model-written response text is not used. Quota family selection uses
+the current topic's selected model, and unknown families display unavailable.
+The same cached provider supplies final-answer footers. See Response identity
+and quota footer below for the cache, timeout, and timestamp rules.
+
 
 ## Tests and acceptance
 
@@ -185,3 +192,19 @@ python -m unittest discover -s tests -v
 ## License
 
 Original project code: MIT. Telegram, Termux and AGY are separate software with their own terms; their binaries and credentials are not redistributed.
+
+## Response identity and quota footer
+
+Final answers show the task's **selected AGY model**, followed by a Usage
+blockquote. Official `agy -p /usage --output-format json` data supplies
+5-hour and weekly remaining percentages and reset times for recognized
+Gemini or Claude/GPT quota buckets. The snapshot includes a check timestamp
+(UTC+08:00); responses within 60 seconds can reuse a snapshot marked cached.
+Quota lookup runs after AGY finishes, uses a 20-second timeout, and failures
+show unavailable without discarding the answer. Unknown schemas and model
+families are not guessed. Context occupancy remains unavailable: ordinary
+AGY token counters do not establish context usage percentage.
+
+Reference: [official CLI release notes](https://www.antigravity.google/docs/changelog/),
+CLI v1.1.11 print-mode read-only slash commands. Official quota output is a
+command payload; it is not parsed as a model-written quota answer.

@@ -54,6 +54,9 @@ class BotTests(unittest.TestCase):
         cfg = Settings("test-only", frozenset({(101, 202)}), "agy",
                        root, None, root / "private.json", True, "24h")
         self.bot = TelegramAgyBot(cfg, self.api)
+        quota_patch = patch.object(self.bot.quota, "get", return_value=({}, None, False))
+        quota_patch.start()
+        self.addCleanup(quota_patch.stop)
         from sessions import scope
         self.bot.sessions.change(scope(101, 202, None), model="gemini-3.8-flash-high", started=True)
 

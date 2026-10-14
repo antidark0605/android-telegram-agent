@@ -11,12 +11,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from access import TelegramAccess, identity_reply
-from agy import AgyRunner, list_models, usage_report
+from agy import AgyRunner, list_models
 from ask_bridge import AskBridge
 from config import ConfigError, Settings, load_settings
 from diagnostics import EventLogger
 from sessions import SessionStore, scope, write_private
 from telegram_api import TelegramAPI, TelegramError
+from usage_footer import QuotaService, decorate_reply, format_usage
 
 
 @dataclass
@@ -93,6 +94,7 @@ class TelegramAgyBot:
         self._pending: Pending | None = None
         self._auxiliary = False
         self._stop = threading.Event()
+        self.quota = QuotaService(settings.agy_command, settings.workspace)
 
     def _send(self, chat: int, text: str, thread: int | None = None,
               markup: dict | None = None) -> int | None:
@@ -269,7 +271,7 @@ class TelegramAgyBot:
             if not available:
                 self._send(chat_id, "AGY is busy; retry quota later.", thread)
             else:
-                threading.Thread(target=self._quota, args=(chat_id, thread),
+                threading.Thread(target=self._quota, args=(chat_id, thread, self.sessions.get(key).get("model")),
                                  daemon=True, name="agy-quota").start()
         elif text.startswith("/"):
             self._send(chat_id, "Unknown command. Try /help.", thread)
@@ -295,11 +297,11 @@ class TelegramAgyBot:
         except (OSError, ValueError, subprocess.TimeoutExpired):
             self._send(chat, "Workspace listing unavailable.", thread)
 
-    def _quota(self, chat: int, thread: int | None) -> None:
+    def _quota(self, chat: int, thread: int | None, model: str | None = None) -> None:
         try:
-            report = usage_report(self.settings.agy_command, self.settings.workspace)
-            self._send(chat, "AGY /usage:\n" + report if report else
-                       "AGY rate-limit report unavailable in this CLI environment.", thread)
+            data, at, cached = self.quota.get()
+            self._send(chat, "\n".join(line.removeprefix("> ") for line in
+                                      format_usage(model, data, at, cached).splitlines()), thread)
         finally:
             with self._lock:
                 self._auxiliary = False
@@ -434,6 +436,9 @@ class TelegramAgyBot:
             if task.message_id is not None and ok:
                 self._edit(task.chat, task.message_id,
                            status_text("📤 Delivering", task.started, task.model))
+            if ok:
+                data, at, cached = self.quota.get()
+                result_text = decorate_reply(result_text, task.model, data, at, cached)
             delivered = self._send_output(task.chat, result_text, task.thread) if ok else True
             if not ok:
                 self._send(task.chat, "Task failed: " + result_text, task.thread)
