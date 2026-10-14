@@ -31,6 +31,13 @@ class FakeAPI:
         self.sent.append((chat, text, thread, reply_markup))
         return len(self.sent)
 
+    def send_rich(self, chat, markdown, thread=None, artifacts=None):
+        self.sent.append((chat, markdown, thread, None))
+        if not hasattr(self, "rich_sent"):
+            self.rich_sent = []
+        self.rich_sent.append((chat, markdown, thread, artifacts))
+        return len(self.sent)
+
     def edit_text(self, chat, mid, text, reply_markup=None):
         self.edits.append((chat, mid, text, reply_markup))
 

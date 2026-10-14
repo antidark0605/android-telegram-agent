@@ -377,6 +377,12 @@ class TelegramAgyBot:
                 ticker = threading.Thread(target=self._timer, args=(task, done),
                                           daemon=True, name="task-timer")
                 ticker.start()
+            folder = self.settings.workspace / "artifacts"
+            if folder.is_symlink():
+                raise ValueError("Artifact directory cannot be a symlink")
+            folder.mkdir(mode=0o700, exist_ok=True)
+            if not folder.is_dir():
+                raise ValueError("Artifact directory is not a directory")
             self.bridge.begin(task.key, task.owner, task.chat, task.thread)
             ask_hint = ("\n\nIf a user decision is required, use the "
                         "telegram-ask MCP tool ask_telegram with a detailed question "

@@ -50,6 +50,8 @@ def _file_for(workspace: Path, name: str, kind: str) -> Artifact:
         raise ValueError("Only the artifacts directory is permitted")
     if any(part in {".", "..", ""} for part in rel.parts):
         raise ValueError("Unsafe artifact path")
+    if (workspace / "artifacts").is_symlink():
+        raise ValueError("Symlink artifact root is forbidden")
     root = (workspace / "artifacts").resolve(strict=True)
     filename = workspace / rel
     # Forbid symlinks anywhere below the artifact root, even if their target
