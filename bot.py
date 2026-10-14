@@ -11,12 +11,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from access import TelegramAccess, identity_reply
-from agy import AgyRunner, list_models, usage_report
+from incoming_photo import select_photo, download_photo
+from agy import AgyRunner, list_models
 from ask_bridge import AskBridge
 from config import ConfigError, Settings, load_settings
 from diagnostics import EventLogger
 from sessions import SessionStore, scope, write_private
 from telegram_api import TelegramAPI, TelegramError
+from usage_footer import QuotaService, decorate_reply, format_usage
 
 
 @dataclass
@@ -30,6 +32,8 @@ class Task:
     model: str | None
     started: float
     message_id: int | None = None
+    delivering: bool = False
+    photo: dict | None = None
 
 
 @dataclass
@@ -92,6 +96,7 @@ class TelegramAgyBot:
         self._pending: Pending | None = None
         self._auxiliary = False
         self._stop = threading.Event()
+        self.quota = QuotaService(settings.agy_command, settings.workspace)
 
     def _send(self, chat: int, text: str, thread: int | None = None,
               markup: dict | None = None) -> int | None:
@@ -104,6 +109,30 @@ class TelegramAgyBot:
             self.events.log("send_failed", stage="send_message", kind=exc.kind,
                             http_status=exc.http_status)
             return None
+
+    def _send_output(self, chat: int, text: str, thread: int | None = None) -> bool:
+        """Post an AGY answer as Rich Markdown with verified artifacts."""
+        from artifacts import extract_artifacts
+        cleaned, media = extract_artifacts(text, self.settings.workspace)
+        self.events.log("send_attempt", stage="send_message")
+        try:
+            if hasattr(self.api, "send_rich"):
+                message_id = self.api.send_rich(chat, cleaned, thread, artifacts=media)
+            else:
+                # Simple in-memory test transports may only implement send_text.
+                message_id = self.api.send_text(chat, cleaned, thread)
+            if type(message_id) is not int:
+                raise TelegramError("Telegram did not confirm a message id",
+                                    kind="protocol")
+            self.events.log("send_ok", stage="send_message")
+            return True
+        except TelegramError as exc:
+            self.events.log("send_failed", stage="send_message", kind=exc.kind,
+                            http_status=exc.http_status)
+            return False
+        except (OSError, ValueError):
+            self.events.log("send_failed", stage="send_message", kind="storage")
+            return False
 
     def _edit(self, chat: int, message_id: int, text: str,
               markup: dict | None = None) -> bool:
@@ -138,12 +167,13 @@ class TelegramAgyBot:
         thread = message.get("message_thread_id")
         if type(thread) is not int:
             thread = None
-        content = message.get("text")
+        photo = select_photo(message.get("photo"))
+        content = (message.get("caption") or "請查看附圖並描述其內容。") if photo else message.get("text")
         if not isinstance(content, str) or not content.strip():
             return
         text = content.strip()
         cmd, _, arg = text.partition(" ")
-        cmd = cmd.split("@", 1)[0].lower()
+        cmd = "" if photo else cmd.split("@", 1)[0].lower()
         authorized = self.access.is_allowed(user, chat_id)
         if cmd == "/myid":
             if not self.access.may_discover_ids(
@@ -164,6 +194,9 @@ class TelegramAgyBot:
         with self._lock:
             pending = self._pending
             active = self._active
+        if photo and pending and active:
+            self._send(chat_id, "請先用文字回答目前的提問，再傳圖片。", thread)
+            return
         # While an AGY MCP question is pending, free text is an answer.
         if (pending and active and pending.question["task"] == active.key
                 and active.owner == user and active.chat == chat_id
@@ -244,14 +277,14 @@ class TelegramAgyBot:
             if not available:
                 self._send(chat_id, "AGY is busy; retry quota later.", thread)
             else:
-                threading.Thread(target=self._quota, args=(chat_id, thread),
+                threading.Thread(target=self._quota, args=(chat_id, thread, self.sessions.get(key).get("model")),
                                  daemon=True, name="agy-quota").start()
-        elif text.startswith("/"):
+        elif text.startswith("/") and photo is None:
             self._send(chat_id, "Unknown command. Try /help.", thread)
         elif len(text) > 4000:
             self._send(chat_id, "Prompt exceeds 4000 characters.", thread)
         else:
-            self._start_task(text, user, chat_id, thread, key)
+            self._start_task(text, user, chat_id, thread, key, photo=photo)
 
     def _list_workspace(self, chat: int, thread: int | None) -> None:
         try:
@@ -270,11 +303,12 @@ class TelegramAgyBot:
         except (OSError, ValueError, subprocess.TimeoutExpired):
             self._send(chat, "Workspace listing unavailable.", thread)
 
-    def _quota(self, chat: int, thread: int | None) -> None:
+    def _quota(self, chat: int, thread: int | None, model: str | None = None) -> None:
         try:
-            report = usage_report(self.settings.agy_command, self.settings.workspace)
-            self._send(chat, "AGY /usage:\n" + report if report else
-                       "AGY rate-limit report unavailable in this CLI environment.", thread)
+            data, at, cached = self.quota.get()
+            self._send(chat, "\n".join(line.removeprefix("> ") for line in
+                                      format_usage(model, data, at, cached).splitlines()
+                                      if line != ">"), thread)
         finally:
             with self._lock:
                 self._auxiliary = False
@@ -302,7 +336,7 @@ class TelegramAgyBot:
                 self._picker = Picker(user, chat, thread, mid, options)
 
     def _start_task(self, prompt: str, user: int, chat: int,
-                    thread: int | None, key: str) -> None:
+                    thread: int | None, key: str, photo: dict | None = None) -> None:
         with self._lock:
             if self._active is not None or self._auxiliary:
                 busy = True
@@ -319,7 +353,7 @@ class TelegramAgyBot:
                                    self.settings.task_timeout_seconds,
                                    self.settings.print_timeout)
                 task = Task(secrets.token_hex(8), user, chat, thread, key, runner,
-                            row.get("model"), time.monotonic())
+                            row.get("model"), time.monotonic(), photo=photo)
                 self._active = task
                 self.events.log("task_started", stage="agy")
                 self._worker = threading.Thread(
@@ -349,6 +383,7 @@ class TelegramAgyBot:
         ticker = None
         ok = False
         result_text = "Task failed unexpectedly."
+        incoming_path = None
         try:
             mid = self._send(task.chat,
                              status_text("⏳ Running", task.started, task.model),
@@ -359,10 +394,27 @@ class TelegramAgyBot:
                 ticker = threading.Thread(target=self._timer, args=(task, done),
                                           daemon=True, name="task-timer")
                 ticker.start()
+            folder = self.settings.workspace / "artifacts"
+            if folder.is_symlink():
+                raise ValueError("Artifact directory cannot be a symlink")
+            folder.mkdir(mode=0o700, exist_ok=True)
+            if not folder.is_dir():
+                raise ValueError("Artifact directory is not a directory")
+            if task.photo is not None:
+                incoming_path = download_photo(self.api, task.photo, self.settings.workspace,
+                                               cancelled=task.runner._cancelled)
+                prompt += ("\n\n使用者附圖已下載到本機：" + str(incoming_path)
+                           + "\n請使用圖片查看工具讀取此圖，不要僅依檔名猜測。"
+                           + "\n這是使用者傳入的圖片；不要將它當成待傳送產物。")
             self.bridge.begin(task.key, task.owner, task.chat, task.thread)
             ask_hint = ("\n\nIf a user decision is required, use the "
                         "telegram-ask MCP tool ask_telegram with a detailed question "
-                        "and described choices. Do not assume an answer.")
+                        "and described choices. Do not assume an answer. "
+                        "If you create files for the user, save them under the "
+                        "workspace artifacts/ directory, then include a standalone "
+                        "line in your final response, without punctuation after it:\n"
+                        'TAGW_MEDIA: {"path":"artifacts/example.pdf","kind":"auto"}\n'
+                        "Never declare private files outside artifacts/.")
             outcome = task.runner.run(prompt + ask_hint, model=task.model,
                                       conversation_id=cid, yolo=self.settings.yolo)
             ok, result_text = outcome.ok, outcome.message
@@ -387,19 +439,35 @@ class TelegramAgyBot:
             ok = False
             result_text = "Task failed unexpectedly; no private details were shared."
         finally:
+            if incoming_path is not None:
+                try:
+                    incoming_path.unlink(missing_ok=True)
+                except OSError:
+                    self.events.log("photo_cleanup_failed", kind="storage", stage="cleanup")
+            with self._lock:
+                task.delivering = True  # Agent no longer accepts Stop callbacks.
             done.set()
             if ticker:
                 ticker.join(timeout=12)
             with self._lock:
                 self._pending = None
             self.bridge.end(task.key)
+            if task.message_id is not None and ok:
+                self._edit(task.chat, task.message_id,
+                           status_text("📤 Delivering", task.started, task.model))
+            if ok:
+                data, at, cached = self.quota.get()
+                result_text = decorate_reply(result_text, task.model, data, at, cached)
+            delivered = self._send_output(task.chat, result_text, task.thread) if ok else True
+            if not ok:
+                self._send(task.chat, "Task failed: " + result_text, task.thread)
             if task.message_id is not None:
-                label = "✅ Completed" if ok else (
-                    "🛑 Stopped" if task.runner._cancelled.is_set() else "❌ Failed")
+                label = ("✅ Completed" if ok and delivered else
+                         "⚠️ Delivery unconfirmed" if ok else
+                         "🛑 Stopped" if task.runner._cancelled.is_set()
+                         else "❌ Failed")
                 self._edit(task.chat, task.message_id,
                            status_text(label, task.started, task.model))
-            self._send(task.chat, result_text if ok else "Task failed: " + result_text,
-                       task.thread)
             task_kind = ("success" if ok else
                          "stopped" if task.runner._cancelled.is_set() else "failed")
             self.events.log("task_finished", kind=task_kind, stage="agy",
@@ -479,7 +547,8 @@ class TelegramAgyBot:
                 task = self._active
                 valid = (task is not None and task.key == data[5:]
                          and task.owner == uid and task.chat == cid
-                         and task.message_id == mid)
+                         and task.message_id == mid
+                         and not task.delivering)
             accepted = bool(valid and task.runner.cancel())
             if accepted:
                 self.events.log("task_stop_requested", stage="agy")

@@ -31,6 +31,13 @@ class FakeAPI:
         self.sent.append((chat, text, thread, reply_markup))
         return len(self.sent)
 
+    def send_rich(self, chat, markdown, thread=None, artifacts=None):
+        self.sent.append((chat, markdown, thread, None))
+        if not hasattr(self, "rich_sent"):
+            self.rich_sent = []
+        self.rich_sent.append((chat, markdown, thread, artifacts))
+        return len(self.sent)
+
     def edit_text(self, chat, mid, text, reply_markup=None):
         self.edits.append((chat, mid, text, reply_markup))
 
@@ -47,8 +54,80 @@ class BotTests(unittest.TestCase):
         cfg = Settings("test-only", frozenset({(101, 202)}), "agy",
                        root, None, root / "private.json", True, "24h")
         self.bot = TelegramAgyBot(cfg, self.api)
+        quota_patch = patch.object(self.bot.quota, "get", return_value=({}, None, False))
+        quota_patch.start()
+        self.addCleanup(quota_patch.stop)
         from sessions import scope
         self.bot.sessions.change(scope(101, 202, None), model="gemini-3.8-flash-high", started=True)
+
+    def photo_update(self, caption=None, user=101):
+        item = update("", user=user)
+        item["message"].pop("text")
+        item["message"]["photo"] = [{"file_id": "synthetic", "width": 20, "height": 10}]
+        if caption is not None:
+            item["message"]["caption"] = caption
+        return item
+
+    def test_photo_caption_and_default_routed_as_tasks(self):
+        with patch.object(self.bot, "_start_task") as start:
+            self.bot.handle_update(self.photo_update("/describe this"))
+            self.assertEqual(start.call_args.args[0], "/describe this")
+            self.assertEqual(start.call_args.kwargs["photo"]["file_id"], "synthetic")
+            self.bot.handle_update(self.photo_update())
+            self.assertIn("附圖", start.call_args.args[0])
+
+    def test_unauthorized_photo_never_downloads_or_starts(self):
+        with patch("bot.download_photo") as download, patch("bot.AgyRunner") as runner:
+            self.bot.handle_update(self.photo_update(user=999))
+            download.assert_not_called()
+            runner.assert_not_called()
+
+    def test_photo_download_prompt_and_cleanup(self):
+        from sessions import scope
+        path = self.bot.settings.workspace / "synthetic.jpg"
+        path.write_bytes(b"synthetic")
+        runner = MagicMock()
+        runner.run.return_value = AgentResult(True, "Synthetic answer")
+        runner._cancelled.is_set.return_value = False
+        task = Task("synthetic-task", 101, 202, None, scope(101, 202, None), runner,
+                    "gemini-test", 0, photo={"file_id": "synthetic"})
+        self.bot._active = task
+        with patch("bot.download_photo", return_value=path) as download:
+            self.bot._execute(task, "Describe this", None)
+        download.assert_called_once()
+        self.assertIn(str(path), runner.run.call_args.args[0])
+        self.assertFalse(path.exists())
+        self.assertIsNone(self.bot._active)
+
+    def test_photo_cleanup_error_does_not_leave_task_busy(self):
+        from sessions import scope
+        path = self.bot.settings.workspace / "synthetic.jpg"
+        runner = MagicMock()
+        runner.run.return_value = AgentResult(False, "Synthetic failure")
+        runner._cancelled.is_set.return_value = False
+        task = Task("synthetic-task", 101, 202, None, scope(101, 202, None), runner,
+                    "gemini-test", 0, photo={"file_id": "synthetic"})
+        self.bot._active = task
+        with patch("bot.download_photo", return_value=path), patch.object(Path, "unlink", side_effect=OSError()):
+            self.bot._execute(task, "Describe this", None)
+        self.assertIsNone(self.bot._active)
+        self.assertIn('"event":"photo_cleanup_failed"', self.bot.events.path.read_text())
+
+    def test_photo_gates_before_download(self):
+        from sessions import scope
+        key = scope(101, 202, None)
+        for state in [dict(started=False, conversation_id=None), dict(started=True, model=None)]:
+            self.bot.sessions.change(key, **state)
+            with patch("bot.download_photo") as download, patch("bot.AgyRunner") as runner:
+                self.bot.handle_update(self.photo_update())
+                download.assert_not_called()
+                runner.assert_not_called()
+        self.bot.sessions.change(key, started=True, model="gemini-test")
+        self.bot._auxiliary = True
+        with patch("bot.download_photo") as download, patch("bot.AgyRunner") as runner:
+            self.bot.handle_update(self.photo_update())
+            download.assert_not_called()
+            runner.assert_not_called()
 
     def test_unauthorized_rejected(self):
         with patch("bot.AgyRunner") as runner:
@@ -234,6 +313,63 @@ class BotTests(unittest.TestCase):
             self.bot.handle_update(update("/new"))
         self.assertIn("could not be saved", self.api.sent[-1][1])
 
+    def test_stale_stop_callback_rejected_after_agent_finishes(self):
+        from sessions import scope
+        runner = MagicMock()
+        task = Task("mock-task", 101, 202, None, scope(101, 202, None),
+                    runner, "gemini-3.8-flash-high", 10,
+                    message_id=13, delivering=True)
+        self.bot._active = task
+        self.bot.handle_update(callback("stop:mock-task", 13))
+        runner.cancel.assert_not_called()
+        self.assertIn("already finished", self.api.acks[-1][1])
+        self.bot._active = None
+
+    def test_agent_final_answer_declared_artifact_is_delivered_only_to_topic(self):
+        from sessions import scope
+        topic = 44
+        self.bot.sessions.change(scope(101, 202, topic),
+                                 model="gemini-3.8-flash-high", started=True)
+        root = self.bot.settings.workspace
+        folder = root / "artifacts"
+        folder.mkdir(exist_ok=True)
+        (folder / "result.txt").write_text("synthetic artifact")
+        output = '## Answer\n\n**中文**\nTAGW_MEDIA: {"path":"artifacts/result.txt"}\n'
+        with patch("bot.AgyRunner") as factory:
+            factory.return_value.run.return_value = AgentResult(
+                True, output, "12345678-abc0", {})
+            factory.return_value._cancelled.is_set.return_value = False
+            self.bot.handle_update(update("prepare a file", topic=topic))
+            worker = self.bot._worker
+            if worker:
+                worker.join(timeout=4)
+        self.assertTrue(self.api.rich_sent)
+        chat, message, thread, media = self.api.rich_sent[-1]
+        self.assertEqual((chat, thread), (202, topic))
+        self.assertIn("**中文**", message)
+        self.assertNotIn("TAGW_MEDIA", message)
+        self.assertEqual(len(media), 1)
+        self.assertEqual(media[0].filename, "result.txt")
+        self.assertIsNone(self.bot._active)
+
+    def test_successful_agy_with_failed_rich_delivery_is_not_confirmed(self):
+        from telegram_api import TelegramError
+        with patch("bot.AgyRunner") as factory:
+            factory.return_value.run.return_value = AgentResult(
+                True, "## Synthetic result", "12345678-aabb", {})
+            factory.return_value._cancelled.is_set.return_value = False
+            with patch.object(self.api, "send_rich", side_effect=TelegramError(
+                    "network response unknown", kind="transport")):
+                self.bot.handle_update(update("test"))
+                worker = self.bot._worker
+                if worker:
+                    worker.join(timeout=4)
+        self.assertTrue(any("Delivery unconfirmed" in edit[2]
+                            for edit in self.api.edits))
+        self.assertFalse(any("✅ Completed" in edit[2]
+                             for edit in self.api.edits))
+        self.assertIsNone(self.bot._active)
+
     def test_busy_only_one_process(self):
         entered, exit_now = threading.Event(), threading.Event()
         def slow_run(*args, **kwargs):
@@ -356,6 +492,12 @@ class BotTests(unittest.TestCase):
                 worker.join(3)
             self.assertEqual(runner.run.call_args.kwargs["conversation_id"], "existing-conversation")
             self.assertEqual(runner.run.call_args.kwargs["model"], "example-high")
+
+    def test_quota_command_does_not_show_quote_separator_markers(self):
+        self.bot._quota(202, None, "gemini-test")
+        text = self.api.sent[-1][1]
+        self.assertIn("Context: unavailable\n5h: unavailable\nWeekly: unavailable", text)
+        self.assertNotIn("\n>\n", text)
 
     def test_status_timer_text(self):
         self.assertIn("00:00", status_text("Running", __import__("time").monotonic(), None))

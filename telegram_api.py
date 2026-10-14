@@ -20,6 +20,7 @@ class TelegramError(RuntimeError):
 class TelegramAPI:
     def __init__(self, token: str):
         self._base = "https://api.telegram.org/bot" + token + "/"
+        self._file_base = "https://api.telegram.org/file/bot" + token + "/"
 
     def _call(self, method: str, payload: dict, timeout: int = 40):
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -72,6 +73,12 @@ class TelegramAPI:
                 mid = result.get("message_id")
                 first_id = mid if isinstance(mid, int) else None
         return first_id
+
+    def send_rich(self, chat_id: int, markdown: str, thread_id: int | None = None,
+                  artifacts=None) -> int | None:
+        """Deliver formatted Markdown and optionally stream declared media."""
+        from rich_delivery import RichDelivery
+        return RichDelivery(self).send(chat_id, thread_id, markdown, artifacts)
 
     def edit_text(self, chat_id: int, message_id: int, text: str,
                   reply_markup: dict | None = None) -> None:

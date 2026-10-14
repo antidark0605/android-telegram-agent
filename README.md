@@ -1,6 +1,6 @@
 # android-telegram-agent
 
-Revision: 2 — 2026-10-13
+Revision: 4 — 2026-10-14
 
 Small non-root **Termux + Telegram + official AGY CLI** Bot for Android. Original Python standard-library code, not a port of another private codebase. No root, inbound ports, OpenClaw, collaboration, kanban, server framework, or pip dependencies.
 
@@ -33,6 +33,27 @@ Each task sends one `⏳ Running · MM:SS` status message with 🛑 Stop, edited
 AGY can call a small **local MCP tool** named `ask_telegram` with `question` and optional `choices` (every choice requires label, description and value). The Bot forwards the question to the same chat/Topic with inline choice buttons or accepts a free-text reply, then returns the answer to the waiting AGY MCP process. A pending free-text reply is not interpreted as a new task.
 
 On Bot startup, `AskBridge.install()` merges the single `telegram-ask` server into the selected **private workspace** `.agents/mcp_config.json`, without touching global AGY settings. Existing unrelated MCP servers are preserved. Startup fails safely on a conflicting `telegram-ask` definition. The bridge stores only pending question/answer data in the private config directory, cleans it when a task ends and never exposes an HTTP listener. The installed AGY CLI must support workspace stdio MCP and load its configuration; **this must be verified on the device**.
+
+## Rich message and artifacts (v0.2 candidate)
+
+The final **AGY response** is delivered via Telegram Bot API **10.3** \`sendRichMessage\`: headings, emphasis, lists, code blocks and tables are handled natively from \`rich_message.markdown\`. The running timer, inline Stop button, slash commands and Ask Telegram question still use the existing message API, so their behavior does not change.
+
+The Bot will attach a file only when the agent **explicitly declares it** on its own line in the final answer. For example, after creating a synthetic PDF under the workspace's \`artifacts/\` directory:
+
+\`\`\`text
+TAGW_MEDIA: {"path":"artifacts/report.pdf","kind":"auto"}
+\`\`\`
+
+- The artifact path must be **relative to the configured workspace** and start with \`artifacts/\`. Never list arbitrary files, follow symlinks, or use paths outside this delivery root. Incoming marker metadata can **never** choose another Telegram chat, user, or Topic.
+- A maximum of **4 artifacts**, each at most **20 MiB** and **40 MiB total** per reply, are allowed. The file must exist and be a regular file. Unsafe markers produce a generic omission notice without disclosing the requested path.
+- PNG/JPEG/WebP typically become in-chat photos, MP3/M4A become audio, MP4 video, and PDF/ZIP/TXT/HTML or unknown file types become documents. The output may combine markdown and multiple media attachments into one Rich Message.
+- The Bot sends files using bounded-memory **multipart/form-data streaming** with 64 KiB file chunks. It does not load whole media files into memory, unlike typical simple multipart examples.
+- If Telegram explicitly rejects the Rich call with HTTP **400 or 404**, the Bot falls back to \`sendMessage\` with safe limited HTML formatting, followed by classic \`sendDocument\`/\`sendPhoto\`/\`sendAudio\`/\`sendVideo\` for declared files. **An ambiguous network failure is not automatically retried** because Telegram may already have accepted the request.
+- Longer answers are split into pieces before reaching rich formatting limits. Some complex Markdown spanning split boundaries may render less perfectly than a short single-message answer. The fallback HTML parser intentionally supports only a readable subset of Markdown.
+
+Never include secrets in artifacts. Telegram group members may see results even if the Bot only executes commands from whitelisted senders. Private credentials, workspaces, personal files, OAuth state, raw logs and physical test-device information must not be committed into the public repository.
+
+**Important:** GitHub mock CI verifies request structure, safety and fallbacks. Actual **Telegram 10.3 rich media delivery**, client rendering, album behavior, and local CLI artifact generation must be confirmed by Local Agent on the device before production deployment.
 
 ## Telegram access control and first-time `/myid` setup
 
@@ -137,7 +158,14 @@ tail -n 80 "$HOME/.config/android-telegram-agent/events.jsonl"
 
 The AGY JSON result has `usage.input_tokens`, `usage.output_tokens` and related token totals. These measure task processing, including possible multiple model calls; they **do not** represent current context occupancy. `/context` therefore shows only verifiable last-task counters and explicitly marks Context occupancy **unavailable** unless an independently verified live context source is added.
 
-`/quota` calls standalone `agy -p "/usage" --output-format json`, requires a verified SUCCESS terminal result without permission denials, and only renders **allowlisted structured numeric** remaining percentages/reset durations (such as `rate_limits.five_hour.remaining_percent`) if the CLI exposes them. Arbitrary model-generated text is **never forwarded** as an account/quota report. Unknown real-device CLI schemas intentionally display **unavailable** until verified and explicitly adapted; this is more limited than a fully implemented quota dashboard. It does not require `llm-quota`, OAuth scraping or account credential access.
+`/quota` calls standalone `agy -p "/usage" --output-format json` and
+accepts only a successful official `command.name=usage` payload. Recognized
+quota buckets provide numeric remaining fractions and timezone-aware reset
+times; model-written response text is not used. Quota family selection uses
+the current topic's selected model, and unknown families display unavailable.
+The same cached provider supplies final-answer footers. See Response identity
+and quota footer below for the cache and timeout rules.
+
 
 ## Tests and acceptance
 
@@ -164,3 +192,43 @@ python -m unittest discover -s tests -v
 ## License
 
 Original project code: MIT. Telegram, Termux and AGY are separate software with their own terms; their binaries and credentials are not redistributed.
+
+## Response identity and quota footer
+
+Revision 6 — 2026-10-14. Final answers show `⚡ [AGY] · <model>` without
+the words "Selected model", followed by a Usage
+blockquote. Official `agy -p /usage --output-format json` data supplies
+5-hour and weekly remaining percentages and reset times for recognized
+Gemini or Claude/GPT quota buckets. Responses within 60 seconds can reuse a
+snapshot marked cached; the check timestamp is not displayed.
+Quota lookup runs after AGY finishes, uses a 45-second timeout, and failures
+show unavailable without discarding the answer. Unknown schemas and model
+families are not guessed. Context occupancy remains unavailable: ordinary
+AGY token counters do not establish context usage percentage.
+
+Reference: [official CLI release notes](https://www.antigravity.google/docs/changelog/),
+CLI v1.1.11 print-mode read-only slash commands. Official quota output is a
+command payload; it is not parsed as a model-written quota answer.
+
+Response headers and Usage footers retain a blank spacer paragraph around the
+answer. Each Usage row is a separate quotation paragraph so Rich Markdown does
+not fold soft line breaks into one continuous sentence.
+
+## Incoming photos
+
+Revision 5 — 2026-10-14. Send a Telegram photo with an optional caption after
+activating the chat/topic and selecting a model. Without a caption, the agent
+is asked to describe the photo. The largest available photo variant is fetched
+using Telegram `getFile`, saved inside the workspace with owner-only access,
+and passed to AGY as an explicit image path. The temporary image is removed
+after the task, including failure. Forced termination or a filesystem error
+can leave private files for manual cleanup; `incoming-images/` is Git-ignored.
+Stop is checked between download reads; an in-progress network read can wait
+up to its 30-second socket timeout. Downloads are limited to 10 MiB and PNG/JPEG.
+Unlisted senders and busy or unactivated sessions cannot initiate downloads.
+Only Telegram photo messages are supported; image documents and album grouping
+are not implemented. Send one photo per task. Earlier ignored photos are not
+replayed. A compatible AGY version and image-capable selected model are required.
+
+References: [Telegram getFile](https://core.telegram.org/bots/api#getfile),
+[AGY print-mode image example](https://github.com/google-antigravity/antigravity-cli/issues/735).
