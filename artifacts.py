@@ -39,7 +39,7 @@ def _content_digest(path: Path, expected) -> str:
     digest = hashlib.sha256()
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     fd = os.open(path, flags)
-    with os.fdopen(fd, "rb") as file:
+    with os.fdopen(fd, "rb", buffering=0) as file:
         current = os.fstat(file.fileno())
         if not stat.S_ISREG(current.st_mode) or _file_signature(current) != _file_signature(expected):
             raise OSError("Artifact changed during validation")

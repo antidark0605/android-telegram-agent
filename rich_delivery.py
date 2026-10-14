@@ -121,7 +121,7 @@ def _stream_payload(parts, attachments: list[tuple[str, Artifact]]) -> Iterable[
         yield header
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         fd = os.open(item.path, flags)
-        with os.fdopen(fd, "rb") as file:
+        with os.fdopen(fd, "rb", buffering=0) as file:
             _check_file(os.fstat(file.fileno()), item)
             remaining = item.size
             digest = hashlib.sha256()
