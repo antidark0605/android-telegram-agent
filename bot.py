@@ -301,7 +301,8 @@ class TelegramAgyBot:
         try:
             data, at, cached = self.quota.get()
             self._send(chat, "\n".join(line.removeprefix("> ") for line in
-                                      format_usage(model, data, at, cached).splitlines()), thread)
+                                      format_usage(model, data, at, cached).splitlines()
+                                      if line != ">"), thread)
         finally:
             with self._lock:
                 self._auxiliary = False

@@ -424,6 +424,12 @@ class BotTests(unittest.TestCase):
             self.assertEqual(runner.run.call_args.kwargs["conversation_id"], "existing-conversation")
             self.assertEqual(runner.run.call_args.kwargs["model"], "example-high")
 
+    def test_quota_command_does_not_show_quote_separator_markers(self):
+        self.bot._quota(202, None, "gemini-test")
+        text = self.api.sent[-1][1]
+        self.assertIn("Context: unavailable\n5h: unavailable\nWeekly: unavailable", text)
+        self.assertNotIn("\n>\n", text)
+
     def test_status_timer_text(self):
         self.assertIn("00:00", status_text("Running", __import__("time").monotonic(), None))
         self.assertIn("Stop", str(stop_keyboard("abc")))
