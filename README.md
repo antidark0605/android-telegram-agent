@@ -200,7 +200,7 @@ blockquote. Official `agy -p /usage --output-format json` data supplies
 5-hour and weekly remaining percentages and reset times for recognized
 Gemini or Claude/GPT quota buckets. The snapshot includes a check timestamp
 (UTC+08:00); responses within 60 seconds can reuse a snapshot marked cached.
-Quota lookup runs after AGY finishes, uses a 20-second timeout, and failures
+Quota lookup runs after AGY finishes, uses a 45-second timeout, and failures
 show unavailable without discarding the answer. Unknown schemas and model
 families are not guessed. Context occupancy remains unavailable: ordinary
 AGY token counters do not establish context usage percentage.

@@ -71,9 +71,9 @@ class QuotaService:
                 try:
                     result = subprocess.run(
                         [self.command, '-p', '/usage', '--output-format', 'json',
-                         '--print-timeout', '15s'], cwd=self.workspace,
+                         '--print-timeout', '30s'], cwd=self.workspace,
                         stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                        encoding='utf-8', errors='replace', timeout=20, check=False)
+                        encoding='utf-8', errors='replace', timeout=45, check=False)
                     if result.returncode == 0 and len(result.stdout) <= 100000:
                         self.data = parse_quota(json.loads(result.stdout))
                 except (OSError, ValueError, RecursionError, subprocess.TimeoutExpired):
