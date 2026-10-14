@@ -30,6 +30,7 @@ class Task:
     model: str | None
     started: float
     message_id: int | None = None
+    delivering: bool = False
 
 
 @dataclass
@@ -422,12 +423,17 @@ class TelegramAgyBot:
             ok = False
             result_text = "Task failed unexpectedly; no private details were shared."
         finally:
+            with self._lock:
+                task.delivering = True  # Agent no longer accepts Stop callbacks.
             done.set()
             if ticker:
                 ticker.join(timeout=12)
             with self._lock:
                 self._pending = None
             self.bridge.end(task.key)
+            if task.message_id is not None and ok:
+                self._edit(task.chat, task.message_id,
+                           status_text("📤 Delivering", task.started, task.model))
             delivered = self._send_output(task.chat, result_text, task.thread) if ok else True
             if not ok:
                 self._send(task.chat, "Task failed: " + result_text, task.thread)
@@ -517,7 +523,8 @@ class TelegramAgyBot:
                 task = self._active
                 valid = (task is not None and task.key == data[5:]
                          and task.owner == uid and task.chat == cid
-                         and task.message_id == mid)
+                         and task.message_id == mid
+                         and not task.delivering)
             accepted = bool(valid and task.runner.cancel())
             if accepted:
                 self.events.log("task_stop_requested", stage="agy")
