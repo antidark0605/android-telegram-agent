@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import html
+import hashlib
 import json
 import mimetypes
 import os
@@ -98,23 +99,45 @@ def _multipart_parts(fields: dict, attachments: list[tuple[str, Artifact]],
     return before, files, closing, size
 
 
+def _check_file(info, item: Artifact) -> None:
+    if (not stat.S_ISREG(info.st_mode) or info.st_size != item.size
+            or info.st_dev != item.device or info.st_ino != item.inode
+            or info.st_mtime_ns != item.mtime_ns
+            or info.st_ctime_ns != item.ctime_ns):
+        raise OSError("Artifact changed since validation")
+
+
+def _confirmed_message_id(result) -> int:
+    mid = result.get("message_id") if isinstance(result, dict) else None
+    if type(mid) is not int or mid <= 0:
+        raise TelegramError("Telegram did not confirm a message id", kind="protocol")
+    return mid
+
+
 def _stream_payload(parts, attachments: list[tuple[str, Artifact]]) -> Iterable[bytes]:
     fields, heads, closing, _ = parts
     yield from fields
     for header, (_name, item) in zip(heads, attachments):
         yield header
-        flags = os.O_RDONLY | (getattr(os, "O_NOFOLLOW", 0))
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         fd = os.open(item.path, flags)
         with os.fdopen(fd, "rb") as file:
-            info = os.fstat(file.fileno())
-            if (not stat.S_ISREG(info.st_mode) or info.st_size != item.size
-                    or info.st_dev != item.device or info.st_ino != item.inode):
-                raise OSError("Artifact changed since validation")
-            while True:
-                data = file.read(64 * 1024)
+            _check_file(os.fstat(file.fileno()), item)
+            remaining = item.size
+            digest = hashlib.sha256()
+            while remaining:
+                _check_file(os.fstat(file.fileno()), item)
+                data = file.read(min(64 * 1024, remaining))
                 if not data:
-                    break
+                    raise OSError("Artifact ended before its validated size")
+                _check_file(os.fstat(file.fileno()), item)
+                digest.update(data)
+                remaining -= len(data)
                 yield data
+            # A mutation while the last chunk was consumed must also fail.
+            _check_file(os.fstat(file.fileno()), item)
+            if digest.hexdigest() != item.sha256:
+                raise OSError("Artifact content changed since validation")
         yield b"\r\n"
     yield closing
 
@@ -181,7 +204,7 @@ class RichDelivery:
         else:
             payload["rich_message"] = {"markdown": markdown or "(empty response)"}
             result = self.api._call("sendRichMessage", payload, timeout=20)
-        return result.get("message_id") if isinstance(result, dict) else None
+        return _confirmed_message_id(result)
 
     def _text_fallback(self, chat: int, thread: int | None, markdown: str) -> int | None:
         first = None
@@ -191,8 +214,9 @@ class RichDelivery:
             if thread is not None:
                 payload["message_thread_id"] = thread
             result = self.api._call("sendMessage", payload, timeout=20)
-            if first is None and isinstance(result, dict):
-                first = result.get("message_id")
+            message_id = _confirmed_message_id(result)
+            if first is None:
+                first = message_id
         return first
 
     def _standard_media(self, chat: int, thread: int | None,
@@ -205,7 +229,8 @@ class RichDelivery:
             payload = {"chat_id": chat}
             if thread is not None:
                 payload["message_thread_id"] = thread
-            self._multipart(method, payload, [(field, item)])
+            result = self._multipart(method, payload, [(field, item)])
+            _confirmed_message_id(result)
 
     def send(self, chat: int, thread: int | None, markdown: str,
              artifacts: list[Artifact] | None = None) -> int | None:

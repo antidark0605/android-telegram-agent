@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import os
 import re
 import stat
 from dataclasses import dataclass
@@ -22,6 +24,35 @@ class Artifact:
     size: int
     device: int
     inode: int
+    mtime_ns: int
+    ctime_ns: int
+    sha256: str
+
+
+def _file_signature(info) -> tuple:
+    return (info.st_dev, info.st_ino, info.st_size,
+            info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _content_digest(path: Path, expected) -> str:
+    """Hash at most the validated size, without loading the entire artifact."""
+    digest = hashlib.sha256()
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(path, flags)
+    with os.fdopen(fd, "rb") as file:
+        current = os.fstat(file.fileno())
+        if not stat.S_ISREG(current.st_mode) or _file_signature(current) != _file_signature(expected):
+            raise OSError("Artifact changed during validation")
+        remaining = expected.st_size
+        while remaining:
+            block = file.read(min(65536, remaining))
+            if not block:
+                raise OSError("Artifact ended during validation")
+            digest.update(block)
+            remaining -= len(block)
+        if _file_signature(os.fstat(file.fileno())) != _file_signature(expected):
+            raise OSError("Artifact changed during validation")
+    return digest.hexdigest()
 
 
 def _kind(name: str, requested: str, size: int) -> str:
@@ -70,7 +101,9 @@ def _file_for(workspace: Path, name: str, kind: str) -> Artifact:
     if len(target.name) > 120:
         raise ValueError("Artifact name is too long")
     return Artifact(target, _kind(target.name, kind, info.st_size),
-                    target.name, info.st_size, info.st_dev, info.st_ino)
+                    target.name, info.st_size, info.st_dev, info.st_ino,
+                    info.st_mtime_ns, info.st_ctime_ns,
+                    _content_digest(target, info))
 
 
 def extract_artifacts(text: str, workspace: Path) -> tuple[str, list[Artifact]]:

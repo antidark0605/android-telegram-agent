@@ -1,5 +1,6 @@
 """No-network tests for rich responses and scoped artifacts."""
 from __future__ import annotations
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -182,6 +183,126 @@ class RichTests(unittest.TestCase):
             self.assertEqual(media["media"][0]["media"]["media"], "attach://upload0")
             self.assertIn("tg://document?id=media0", media["markdown"])
             self.assertEqual(uploads[1][1]["message_thread_id"], 222)
+
+
+class DeliveryRegressionTests(unittest.TestCase):
+    def test_mutations_after_first_chunk_fail_without_extra_bytes(self):
+        for mutation in ("grow", "truncate", "rewrite"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                (root / "artifacts").mkdir()
+                file = root / "artifacts" / "sample.bin"
+                file.write_bytes(b"A" * 150000)
+                _, assets = extract_artifacts(
+                    'TAGW_MEDIA: {"path":"artifacts/sample.bin"}', root)
+                attachments = [("upload0", assets[0])]
+                parts = _multipart_parts({}, attachments, "test")
+                stream = iter(_stream_payload(parts, attachments))
+                next(stream)  # Multipart header.
+                first = next(stream)
+                self.assertEqual(len(first), 65536)
+                with file.open("r+b") as changed:
+                    if mutation == "grow":
+                        changed.truncate(21 * 1024 * 1024)
+                    elif mutation == "truncate":
+                        changed.truncate(1)
+                    else:
+                        changed.seek(65536)
+                        changed.write(b"B" * 100)
+                # Force a distinct timestamp even on coarse filesystems.
+                os.utime(file, ns=(assets[0].mtime_ns,
+                                               assets[0].mtime_ns + 1000000000))
+                with self.assertRaises(OSError):
+                    next(stream)
+                self.assertEqual(list(stream), [])
+
+    def test_mutation_after_last_chunk_and_same_size_before_open(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "artifacts").mkdir()
+            file = root / "artifacts" / "sample.txt"
+            file.write_bytes(b"AAAA")
+            _, assets = extract_artifacts(
+                'TAGW_MEDIA: {"path":"artifacts/sample.txt"}', root)
+            items = [("upload0", assets[0])]
+            parts = _multipart_parts({}, items, "test")
+            stream = iter(_stream_payload(parts, items))
+            next(stream)
+            self.assertEqual(next(stream), b"AAAA")
+            file.write_bytes(b"BBBB")
+            os.utime(file, ns=(assets[0].mtime_ns,
+                                           assets[0].mtime_ns + 1000000000))
+            with self.assertRaises(OSError):
+                next(stream)
+            with self.assertRaises(OSError):
+                list(_stream_payload(parts, items))
+
+    def test_same_metadata_rewrite_cannot_complete_multipart(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "artifacts").mkdir()
+            file = root / "artifacts" / "sample.bin"
+            file.write_bytes(b"A" * 150000)
+            _, assets = extract_artifacts(
+                'TAGW_MEDIA: {"path":"artifacts/sample.bin"}', root)
+            original_info = file.stat()
+            items = [("upload0", assets[0])]
+            parts = _multipart_parts({}, items, "test")
+            # Model a filesystem whose timestamp resolution hides the rewrite.
+            with patch("rich_delivery.os.fstat", return_value=original_info):
+                stream = iter(_stream_payload(parts, items))
+                next(stream)
+                self.assertEqual(len(next(stream)), 65536)
+                with file.open("r+b") as changed:
+                    changed.seek(70000)
+                    changed.write(b"B" * 100)
+                emitted = []
+                with self.assertRaises(OSError):
+                    for block in stream:
+                        emitted.append(block)
+                self.assertNotIn(parts[2], emitted)
+
+    def test_every_rich_chunk_requires_confirmation(self):
+        api = TelegramAPI("synthetic-token")
+        for invalid in ({}, None, {"message_id": True},
+                        {"message_id": 0}, {"message_id": -1},
+                        {"message_id": "12"}):
+            with self.subTest(invalid=invalid), patch.object(
+                    api, "_call", side_effect=[{"message_id": 11}, invalid]) as call:
+                with self.assertRaises(TelegramError) as caught:
+                    RichDelivery(api).send(101, 202, "x" * 11001)
+                self.assertEqual(caught.exception.kind, "protocol")
+                self.assertEqual(call.call_count, 2)  # No fallback or retry.
+
+    def test_every_fallback_text_chunk_requires_confirmation(self):
+        api = TelegramAPI("synthetic-token")
+        with patch.object(api, "_call", side_effect=[
+                TelegramError("rejected", kind="http", http_status=400),
+                {"message_id": 11}, {}]) as call:
+            with self.assertRaises(TelegramError) as caught:
+                RichDelivery(api).send(101, 202, "x" * 6001)
+            self.assertEqual(caught.exception.kind, "protocol")
+            self.assertEqual(call.call_count, 3)
+
+    def test_every_fallback_attachment_requires_confirmation(self):
+        api = TelegramAPI("synthetic-token")
+        sender = RichDelivery(api)
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "artifacts").mkdir()
+            for name in ("first.txt", "second.txt"):
+                (root / "artifacts" / name).write_text("synthetic")
+            _, assets = extract_artifacts(
+                'TAGW_MEDIA: {"path":"artifacts/first.txt"}\n'
+                'TAGW_MEDIA: {"path":"artifacts/second.txt"}', root)
+            with (patch.object(sender, "_multipart", side_effect=[
+                    TelegramError("rejected", kind="http", http_status=404),
+                    {"message_id": 12}, {}]) as upload,
+                  patch.object(api, "_call", return_value={"message_id": 11})):
+                with self.assertRaises(TelegramError) as caught:
+                    sender.send(101, 202, "Synthetic", assets)
+                self.assertEqual(caught.exception.kind, "protocol")
+                self.assertEqual(upload.call_count, 3)
 
 
 if __name__ == "__main__":

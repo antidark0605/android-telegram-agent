@@ -1,5 +1,7 @@
 # Android v0.2: Telegram Rich Output and Artifact Acceptance
 
+Revision: 2 — 2026-10-14
+
 This is a **candidate**, not a deployment log. Use synthetic file names and
 data. No real device model, hardware serial, company name, chat ID, Bot token,
 personal path, private repository URL, OAuth credentials, chat content, or
@@ -60,3 +62,20 @@ One private, sanitized result table: R01–R16, PASS/FAIL/NOT VERIFIED,
 generic failure cause, fixed tested Commit SHA. Keep screenshots, tokens,
 real paths/filenames, serial numbers, stdout/stderr and user conversations
 **only in the private test environment**.
+
+## Delivery regression checks
+
+- Grow, truncate, or rewrite a synthetic artifact after the first upload chunk;
+  delivery must fail without emitting bytes beyond the validated file size.
+  Modification timestamps and file identity are checked before and during reads,
+  including after the final chunk. Already transmitted bytes cannot be recalled;
+  this is bounded streaming with mutation detection, not an atomic file snapshot.
+  A bounded validation pass records SHA-256; the streamed bytes must match it
+  before the multipart terminator is sent, including when timestamp resolution
+  hides a same-size rewrite. This adds one full file read without buffering the
+  whole file. A later source edit to bytes already sent does not invalidate those
+  original validated bytes if neither metadata nor streamed content changes.
+- Return a missing, boolean, nonpositive, or noninteger message ID for a later
+  Rich chunk, fallback text chunk, or fallback attachment. Delivery must remain
+  unconfirmed, with no automatic retry or protocol-error fallback. Every send
+  requires its own valid message ID, including sends after the first success.
