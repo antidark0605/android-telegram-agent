@@ -241,6 +241,18 @@ class BotTests(unittest.TestCase):
             self.bot.handle_update(update("/new"))
         self.assertIn("could not be saved", self.api.sent[-1][1])
 
+    def test_stale_stop_callback_rejected_after_agent_finishes(self):
+        from sessions import scope
+        runner = MagicMock()
+        task = Task("mock-task", 101, 202, None, scope(101, 202, None),
+                    runner, "gemini-3.8-flash-high", 10,
+                    message_id=13, delivering=True)
+        self.bot._active = task
+        self.bot.handle_update(callback("stop:mock-task", 13))
+        runner.cancel.assert_not_called()
+        self.assertIn("already finished", self.api.acks[-1][1])
+        self.bot._active = None
+
     def test_agent_final_answer_declared_artifact_is_delivered_only_to_topic(self):
         from sessions import scope
         topic = 44
