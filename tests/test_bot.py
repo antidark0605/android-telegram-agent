@@ -268,6 +268,24 @@ class BotTests(unittest.TestCase):
         self.assertEqual(media[0].filename, "result.txt")
         self.assertIsNone(self.bot._active)
 
+    def test_successful_agy_with_failed_rich_delivery_is_not_confirmed(self):
+        from telegram_api import TelegramError
+        with patch("bot.AgyRunner") as factory:
+            factory.return_value.run.return_value = AgentResult(
+                True, "## Synthetic result", "12345678-aabb", {})
+            factory.return_value._cancelled.is_set.return_value = False
+            with patch.object(self.api, "send_rich", side_effect=TelegramError(
+                    "network response unknown", kind="transport")):
+                self.bot.handle_update(update("test"))
+                worker = self.bot._worker
+                if worker:
+                    worker.join(timeout=4)
+        self.assertTrue(any("Delivery unconfirmed" in edit[2]
+                            for edit in self.api.edits))
+        self.assertFalse(any("✅ Completed" in edit[2]
+                             for edit in self.api.edits))
+        self.assertIsNone(self.bot._active)
+
     def test_busy_only_one_process(self):
         entered, exit_now = threading.Event(), threading.Event()
         def slow_run(*args, **kwargs):
