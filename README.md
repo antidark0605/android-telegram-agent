@@ -1,6 +1,6 @@
 # android-telegram-agent
 
-Revision: 3 — 2026-10-14
+Revision: 4 — 2026-10-14
 
 Small non-root **Termux + Telegram + official AGY CLI** Bot for Android. Original Python standard-library code, not a port of another private codebase. No root, inbound ports, OpenClaw, collaboration, kanban, server framework, or pip dependencies.
 
@@ -208,3 +208,7 @@ AGY token counters do not establish context usage percentage.
 Reference: [official CLI release notes](https://www.antigravity.google/docs/changelog/),
 CLI v1.1.11 print-mode read-only slash commands. Official quota output is a
 command payload; it is not parsed as a model-written quota answer.
+
+Response headers and Usage footers retain a blank spacer paragraph around the
+answer. Each Usage row is a separate quotation paragraph so Rich Markdown does
+not fold soft line breaks into one continuous sentence.

@@ -81,5 +81,16 @@ class UsageTests(unittest.TestCase):
         self.assertIn('5h: unavailable',message)
 
 
+    def test_visible_gaps_and_quote_paragraph_boundaries(self):
+        data=parse_quota(fixture())
+        at=datetime(2030,1,1,tzinfo=timezone.utc)
+        message=decorate_reply('Synthetic body', 'gemini-test', data, at)
+        self.assertIn('`gemini-test`\n\n\u00a0\n\nSynthetic body',message)
+        self.assertIn('Synthetic body\n\n\u00a0\n\n> 📊',message)
+        footer=format_usage('gemini-test', data, at)
+        self.assertEqual(len(footer.split('\n>\n')),5)
+        self.assertIn('> Context: unavailable\n>\n> 5h:',footer)
+
+
 if __name__=='__main__':
     unittest.main()

@@ -97,11 +97,14 @@ def format_usage(model, data, at, cached=False):
             lines.append(f'{label}: {100-left:.1f}% used · {left:.1f}% left · resets {reset:%m/%d %H:%M}')
     if data and at is not None:
         lines.append(f'Quota checked: {at:%m/%d %H:%M:%S} UTC+08:00' + (' · cached' if cached else ''))
-    return '\n'.join('> ' + line for line in lines)
+    # Separate quote paragraphs: soft Markdown line breaks are folded by Telegram.
+    return '\n>\n'.join('> ' + line for line in lines)
 
 
 def decorate_reply(text, model, data, at, cached=False):
     # The task model is supplied by the bot, never inferred from model prose.
     selected = model if isinstance(model, str) and model and len(model) < 90 else 'unavailable'
     selected = selected.replace('`', '').replace('\r', ' ').replace('\n', ' ')
-    return f'⚡ **[AGY]** · Selected model: `{selected}`\n\n{text}\n\n' + format_usage(model, data, at, cached)
+    # A nonbreaking-space paragraph retains a visible blank line in Rich output.
+    gap = '\n\n\u00a0\n\n'
+    return f'⚡ **[AGY]** · Selected model: `{selected}`' + gap + text + gap + format_usage(model, data, at, cached)
