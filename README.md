@@ -34,6 +34,27 @@ AGY can call a small **local MCP tool** named `ask_telegram` with `question` and
 
 On Bot startup, `AskBridge.install()` merges the single `telegram-ask` server into the selected **private workspace** `.agents/mcp_config.json`, without touching global AGY settings. Existing unrelated MCP servers are preserved. Startup fails safely on a conflicting `telegram-ask` definition. The bridge stores only pending question/answer data in the private config directory, cleans it when a task ends and never exposes an HTTP listener. The installed AGY CLI must support workspace stdio MCP and load its configuration; **this must be verified on the device**.
 
+## Rich message and artifacts (v0.2 candidate)
+
+The final **AGY response** is delivered via Telegram Bot API **10.3** \`sendRichMessage\`: headings, emphasis, lists, code blocks and tables are handled natively from \`rich_message.markdown\`. The running timer, inline Stop button, slash commands and Ask Telegram question still use the existing message API, so their behavior does not change.
+
+The Bot will attach a file only when the agent **explicitly declares it** on its own line in the final answer. For example, after creating a synthetic PDF under the workspace's \`artifacts/\` directory:
+
+\`\`\`text
+TAGW_MEDIA: {"path":"artifacts/report.pdf","kind":"auto"}
+\`\`\`
+
+- The artifact path must be **relative to the configured workspace** and start with \`artifacts/\`. Never list arbitrary files, follow symlinks, or use paths outside this delivery root. Incoming marker metadata can **never** choose another Telegram chat, user, or Topic.
+- A maximum of **4 artifacts**, each at most **20 MiB** and **40 MiB total** per reply, are allowed. The file must exist and be a regular file. Unsafe markers produce a generic omission notice without disclosing the requested path.
+- PNG/JPEG/WebP typically become in-chat photos, MP3/M4A become audio, MP4 video, and PDF/ZIP/TXT/HTML or unknown file types become documents. The output may combine markdown and multiple media attachments into one Rich Message.
+- The Bot sends files using bounded-memory **multipart/form-data streaming** with 64 KiB file chunks. It does not load whole media files into memory, unlike typical simple multipart examples.
+- If Telegram explicitly rejects the Rich call with HTTP **400 or 404**, the Bot falls back to \`sendMessage\` with safe limited HTML formatting, followed by classic \`sendDocument\`/\`sendPhoto\`/\`sendAudio\`/\`sendVideo\` for declared files. **An ambiguous network failure is not automatically retried** because Telegram may already have accepted the request.
+- Longer answers are split into pieces before reaching rich formatting limits. Some complex Markdown spanning split boundaries may render less perfectly than a short single-message answer. The fallback HTML parser intentionally supports only a readable subset of Markdown.
+
+Never include secrets in artifacts. Telegram group members may see results even if the Bot only executes commands from whitelisted senders. Private credentials, workspaces, personal files, OAuth state, raw logs and physical test-device information must not be committed into the public repository.
+
+**Important:** GitHub mock CI verifies request structure, safety and fallbacks. Actual **Telegram 10.3 rich media delivery**, client rendering, album behavior, and local CLI artifact generation must be confirmed by Local Agent on the device before production deployment.
+
 ## Telegram access control and first-time `/myid` setup
 
 This Bot does not authorize an entire group just because a message arrived there. Every normal incoming text command, AGY prompt, Topic/session action and inline callback requires an exact **`(user_id, chat_id)` pair** in the private `allowed_pairs` configuration. The chat ID may be negative for Telegram groups/supergroups; Topic IDs are routing/session scopes *inside* an authorized chat, not independent permissions. If another user joins an authorized group, that user still cannot control AGY until their **own user/chat pair** is explicitly added. Unknown senders are ignored and do not receive a denial message. Bot-originated messages are ignored to avoid loops.

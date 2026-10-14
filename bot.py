@@ -389,8 +389,8 @@ class TelegramAgyBot:
                         "and described choices. Do not assume an answer. "
                         "If you create files for the user, save them under the "
                         "workspace artifacts/ directory, then include a standalone "
-                        "line in your final response: "
-                        'TAGW_MEDIA: {"path":"artifacts/example.pdf","kind":"auto"}. '
+                        "line in your final response, without punctuation after it:\n"
+                        'TAGW_MEDIA: {"path":"artifacts/example.pdf","kind":"auto"}\n'
                         "Never declare private files outside artifacts/.")
             outcome = task.runner.run(prompt + ask_hint, model=task.model,
                                       conversation_id=cid, yolo=self.settings.yolo)
