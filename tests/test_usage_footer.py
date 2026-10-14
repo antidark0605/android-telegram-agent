@@ -76,7 +76,8 @@ class UsageTests(unittest.TestCase):
     def test_header_and_marker_are_preserved(self):
         text='Answer\nTAGW_MEDIA: {"path":"artifacts/example.txt"}'
         message=decorate_reply(text,'gemini-test',{},None)
-        self.assertIn('Selected model: `gemini-test`',message)
+        self.assertIn('⚡ **[AGY]** · `gemini-test`',message)
+        self.assertNotIn('Selected model:',message)
         self.assertIn(text,message)
         self.assertIn('5h: unavailable',message)
         self.assertNotIn('Quota checked',message)

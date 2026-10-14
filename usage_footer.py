@@ -105,4 +105,4 @@ def decorate_reply(text, model, data, at, cached=False):
     selected = selected.replace('`', '').replace('\r', ' ').replace('\n', ' ')
     # A nonbreaking-space paragraph retains a visible blank line in Rich output.
     gap = '\n\n\u00a0\n\n'
-    return f'⚡ **[AGY]** · Selected model: `{selected}`' + gap + text + gap + format_usage(model, data, at, cached)
+    return f'⚡ **[AGY]** · `{selected}`' + gap + text + gap + format_usage(model, data, at, cached)

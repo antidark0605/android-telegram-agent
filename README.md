@@ -195,7 +195,8 @@ Original project code: MIT. Telegram, Termux and AGY are separate software with 
 
 ## Response identity and quota footer
 
-Final answers show the task's **selected AGY model**, followed by a Usage
+Revision 6 — 2026-10-14. Final answers show `⚡ [AGY] · <model>` without
+the words "Selected model", followed by a Usage
 blockquote. Official `agy -p /usage --output-format json` data supplies
 5-hour and weekly remaining percentages and reset times for recognized
 Gemini or Claude/GPT quota buckets. Responses within 60 seconds can reuse a
