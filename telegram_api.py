@@ -6,6 +6,12 @@ import socket
 import urllib.error
 import urllib.request
 
+from vendor.telegram_ui import split_text as ui_split_text
+from vendor.telegram_ui import utf16_length
+
+# Conservative cap on the raw formatted string, markup included.
+FORMATTED_TEXT_LIMIT = 4096
+
 
 class TelegramError(RuntimeError):
     """Only safe categorical metadata; never include URL, token or response body."""
@@ -58,12 +64,23 @@ class TelegramAPI:
         return result
 
     def send_text(self, chat_id: int, text: str, thread_id: int | None = None,
-                  reply_markup: dict | None = None) -> int | None:
-        """Send chunks, attaching buttons only to the first; return first message ID."""
+                  reply_markup: dict | None = None,
+                  parse_mode: str | None = None) -> int | None:
+        """Send chunks, attaching buttons only to the first; return first message ID.
+
+        Formatted text (parse_mode) is a short status sent whole: splitting
+        could cut HTML tags apart, so oversized formatted text is rejected.
+        """
         first_id = None
-        for index, part in enumerate(split_text(text)):
+        if parse_mode:
+            parts = [_check_formatted(text or "(empty response)")]
+        else:
+            parts = split_text(text)
+        for index, part in enumerate(parts):
             data = {"chat_id": chat_id, "text": part,
                     "link_preview_options": {"is_disabled": True}}
+            if parse_mode:
+                data["parse_mode"] = parse_mode
             if thread_id is not None:
                 data["message_thread_id"] = thread_id
             if reply_markup is not None and index == 0:
@@ -81,11 +98,15 @@ class TelegramAPI:
         return RichDelivery(self).send(chat_id, thread_id, markdown, artifacts)
 
     def edit_text(self, chat_id: int, message_id: int, text: str,
-                  reply_markup: dict | None = None) -> None:
-        self._call("editMessageText", {
-            "chat_id": chat_id, "message_id": message_id,
-            "text": text, "reply_markup": reply_markup or {"inline_keyboard": []},
-        }, timeout=10)
+                  reply_markup: dict | None = None,
+                  parse_mode: str | None = None) -> None:
+        if parse_mode:
+            _check_formatted(text)
+        data = {"chat_id": chat_id, "message_id": message_id,
+                "text": text, "reply_markup": reply_markup or {"inline_keyboard": []}}
+        if parse_mode:
+            data["parse_mode"] = parse_mode
+        self._call("editMessageText", data, timeout=10)
 
     def answer_callback(self, query_id: str, text: str = "") -> None:
         self._call("answerCallbackQuery", {
@@ -94,20 +115,18 @@ class TelegramAPI:
         }, timeout=10)
 
 
+def _check_formatted(text: str) -> str:
+    """Reject formatted text over FORMATTED_TEXT_LIMIT UTF-16 units; never split it."""
+    if utf16_length(text) > FORMATTED_TEXT_LIMIT:
+        raise TelegramError("Formatted Telegram message was too long", kind="protocol")
+    return text
+
+
 def split_text(text: str, limit: int = 3800) -> list[str]:
+    """Plain-text chunks of at most `limit` UTF-16 units; keeps every character.
+
+    Markdown, code fences and tables spanning a boundary are not repaired.
+    """
     if not text:
         return ["(empty response)"]
-    chunks = []
-    remaining = text
-    while remaining:
-        if len(remaining) <= limit:
-            chunks.append(remaining)
-            break
-        split_at = remaining.rfind("\n", 0, limit + 1)
-        if split_at < limit // 2:
-            split_at = limit
-        else:
-            split_at += 1
-        chunks.append(remaining[:split_at])
-        remaining = remaining[split_at:]
-    return chunks
+    return ui_split_text(text, limit)

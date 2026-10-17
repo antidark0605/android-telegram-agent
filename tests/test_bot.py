@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from agy import AgentResult
-from bot import Task, TelegramAgyBot, status_text, stop_keyboard
+from bot import Task, TelegramAgyBot, status_text
 from config import Settings
 
 
@@ -25,21 +25,24 @@ def callback(data, mid, user=101, chat=202):
 
 class FakeAPI:
     def __init__(self):
-        self.sent, self.edits, self.acks = [], [], []
+        self.sent, self.edits, self.acks, self.log = [], [], [], []
 
-    def send_text(self, chat, text, thread=None, reply_markup=None):
-        self.sent.append((chat, text, thread, reply_markup))
+    def send_text(self, chat, text, thread=None, reply_markup=None, parse_mode=None):
+        self.sent.append((chat, text, thread, reply_markup, parse_mode))
+        self.log.append(("send", text))
         return len(self.sent)
 
     def send_rich(self, chat, markdown, thread=None, artifacts=None):
-        self.sent.append((chat, markdown, thread, None))
+        self.sent.append((chat, markdown, thread, None, None))
+        self.log.append(("rich", markdown))
         if not hasattr(self, "rich_sent"):
             self.rich_sent = []
         self.rich_sent.append((chat, markdown, thread, artifacts))
         return len(self.sent)
 
-    def edit_text(self, chat, mid, text, reply_markup=None):
-        self.edits.append((chat, mid, text, reply_markup))
+    def edit_text(self, chat, mid, text, reply_markup=None, parse_mode=None):
+        self.edits.append((chat, mid, text, reply_markup, parse_mode))
+        self.log.append(("edit", text))
 
     def answer_callback(self, query, text=""):
         self.acks.append((query, text))
@@ -280,7 +283,7 @@ class BotTests(unittest.TestCase):
                 worker.join(3)
         self.assertEqual(self.bot.sessions.get(key)["conversation_id"], "12345678-aaaa")
         self.assertEqual(self.bot.sessions.get(key)["last_usage"]["input_tokens"], 11)
-        self.assertTrue(any("Completed" in item[2] for item in self.api.edits))
+        self.assertTrue(any("已完成" in item[2] for item in self.api.edits))
         self.assertTrue(any("model result" in item[1] for item in self.api.sent))
         self.assertIsNone(self.bot._active)
 
@@ -296,8 +299,8 @@ class BotTests(unittest.TestCase):
                 worker = self.bot._worker
                 if worker:
                     worker.join(3)
-        self.assertFalse(any("✅ Completed" in edit[2] for edit in self.api.edits))
-        self.assertTrue(any("❌ Failed" in edit[2] for edit in self.api.edits))
+        self.assertFalse(any("已完成" in edit[2] for edit in self.api.edits))
+        self.assertTrue(any("失敗" in edit[2] for edit in self.api.edits))
         self.assertTrue(any("session state could not be saved" in item[1]
                             for item in self.api.sent))
         from sessions import scope
@@ -366,8 +369,9 @@ class BotTests(unittest.TestCase):
                     worker.join(timeout=4)
         self.assertTrue(any("Delivery unconfirmed" in edit[2]
                             for edit in self.api.edits))
-        self.assertFalse(any("✅ Completed" in edit[2]
+        self.assertFalse(any("已完成" in edit[2]
                              for edit in self.api.edits))
+        self.assertEqual(self.api.edits[-1][3], {"inline_keyboard": []})
         self.assertIsNone(self.bot._active)
 
     def test_busy_only_one_process(self):
@@ -498,10 +502,124 @@ class BotTests(unittest.TestCase):
         text = self.api.sent[-1][1]
         self.assertIn("Context: unavailable\n5h: unavailable\nWeekly: unavailable", text)
         self.assertNotIn("\n>\n", text)
+        self.assertIsNone(self.api.sent[-1][4])  # Plain command stays plain.
 
     def test_status_timer_text(self):
         self.assertIn("00:00", status_text("Running", __import__("time").monotonic(), None))
-        self.assertIn("Stop", str(stop_keyboard("abc")))
+
+    def run_task(self, result, model="gemini-test", key="synthetic-key",
+                 cancelled=False, topic=None):
+        import time
+        from sessions import scope
+        runner = MagicMock()
+        runner.run.return_value = result
+        runner._cancelled.is_set.return_value = cancelled
+        task = Task(key, 101, 202, topic, scope(101, 202, topic), runner,
+                    model, time.monotonic())
+        self.bot._active = task
+        self.bot._execute(task, "prompt", None)
+        return task
+
+    def test_status_payload_send_edit_same_message_and_delivery_order(self):
+        task = self.run_task(AgentResult(True, "Synthetic body"))
+        chat, text, thread, markup, mode = self.api.sent[0]
+        self.assertEqual((chat, thread, mode), (202, None, "HTML"))
+        self.assertIn("<b>任務進度</b>", text)
+        self.assertIn("執行中", text)
+        self.assertEqual(markup, {"inline_keyboard": [[
+            {"text": "🛑 中斷", "callback_data": "stop:" + task.key}]]})
+        self.assertEqual(task.message_id, 1)
+        self.assertTrue(self.api.edits)
+        for edit in self.api.edits:
+            self.assertEqual((edit[0], edit[1], edit[4]), (202, 1, "HTML"))
+            self.assertIsNotNone(edit[3])
+        self.assertIn("Delivering", self.api.edits[0][2])
+        self.assertEqual(self.api.edits[0][3], {"inline_keyboard": []})
+        self.assertIn("已完成", self.api.edits[-1][2])
+        self.assertEqual(self.api.edits[-1][3], {"inline_keyboard": []})
+        kinds = [kind for kind, _ in self.api.log]
+        delivering = next(i for i, (k, t) in enumerate(self.api.log)
+                          if k == "edit" and "Delivering" in t)
+        completed = next(i for i, (k, t) in enumerate(self.api.log)
+                         if k == "edit" and "已完成" in t)
+        self.assertLess(delivering, kinds.index("rich"))
+        self.assertLess(kinds.index("rich"), completed)
+        self.assertIsNone(self.bot._active)
+
+    def test_timer_edits_status_with_stop_and_stops_when_delivering(self):
+        from bot import Pending
+        from sessions import scope
+        task = Task("timer-key", 101, 202, 7, scope(101, 202, 7), MagicMock(),
+                    "gemini-test", __import__("time").monotonic(), message_id=5)
+        self.bot._active = task
+        self.bot._pending = Pending({"task": task.key}, 9)
+        done = MagicMock()
+        done.wait.side_effect = [False, True]
+        self.bot._timer(task, done)
+        chat, mid, text, markup, mode = self.api.edits[-1]
+        self.assertEqual((chat, mid, mode), (202, 5, "HTML"))
+        self.assertIn("等待回覆", text)
+        self.assertEqual(markup["inline_keyboard"][0][0]["callback_data"], "stop:timer-key")
+        task.delivering = True
+        done.wait.side_effect = [False, True]
+        count = len(self.api.edits)
+        self.bot._timer(task, done)
+        self.assertEqual(len(self.api.edits), count)
+
+    def test_emitted_stop_callback_keeps_owner_chat_message_task_checks(self):
+        from presentation import progress_message
+        from sessions import scope
+        runner = MagicMock()
+        runner.cancel.return_value = True
+        task = Task("emit-key", 101, 202, None, scope(101, 202, None),
+                    runner, "gemini-test", 1, message_id=4)
+        self.bot._active = task
+        _, markup = progress_message("running", task.started, task.key)
+        data = markup["inline_keyboard"][0][0]["callback_data"]
+        self.assertEqual(data, "stop:emit-key")
+        self.bot.handle_update(callback(data, 4, user=999))
+        self.bot.handle_update(callback(data, 4, chat=999))
+        self.bot.handle_update(callback(data, 5))
+        self.bot.handle_update(callback("stop:other-key", 4))
+        self.bot.handle_update(callback("task:cancel:emit-key", 4))
+        task.delivering = True
+        self.bot.handle_update(callback(data, 4))
+        runner.cancel.assert_not_called()
+        task.delivering = False
+        self.bot.handle_update(callback(data, 4))
+        runner.cancel.assert_called_once()
+
+    def test_reply_uses_task_model_verified_quota_and_unknown_context(self):
+        from datetime import datetime, timezone
+        data = {"3p-5h": {"left": 20.0,
+                          "reset": datetime(2030, 1, 2, 3, 4, tzinfo=timezone.utc)}}
+        self.bot.quota.get.return_value = (data, None, True)
+        body = 'Exact *body*\nTAGW_MEDIA: {"path":"artifacts/missing.txt"}'
+        # The topic currently selects a Gemini model; the task ran on Claude.
+        self.run_task(AgentResult(True, body, None, {"input_tokens": 123456}),
+                      model="claude-test")
+        markdown = self.api.rich_sent[-1][1]
+        self.assertTrue(markdown.startswith("⚡ **[AGY]** · claude\\-test\n"))
+        self.assertIn("Exact *body*", markdown)
+        self.assertIn("[Artifact omitted", markdown)
+        self.assertIn("> 📊 **Usage** · cached", markdown)
+        self.assertIn("> Context: unavailable", markdown)
+        self.assertIn("5h: 80.0% used · 20.0% left · resets 01/02 11:04", markdown)
+        self.assertIn("Weekly: unavailable", markdown)
+        self.assertNotIn("123456", markdown)
+        self.assertEqual(self.bot.quota.get.call_count, 1)
+
+    def test_cancelled_and_failed_tasks_clear_stop_without_delivering(self):
+        for cancelled, label in [(True, "已取消"), (False, "失敗")]:
+            self.api.edits.clear()
+            task = self.run_task(AgentResult(False, "synthetic stop"), cancelled=cancelled)
+            self.assertFalse(any("Delivering" in edit[2] for edit in self.api.edits))
+            self.assertIn(label, self.api.edits[-1][2])
+            self.assertEqual(self.api.edits[-1][3], {"inline_keyboard": []})
+            self.assertIn("Task failed: synthetic stop", self.api.sent[-1][1])
+            task.runner.cancel.reset_mock()
+            self.bot.handle_update(callback("stop:" + task.key, task.message_id))
+            task.runner.cancel.assert_not_called()
 
 
 if __name__ == "__main__":
