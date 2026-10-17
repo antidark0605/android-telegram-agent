@@ -6,7 +6,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-from usage_footer import QuotaService, parse_quota, format_usage, decorate_reply
+from usage_footer import QuotaService, parse_quota
+from presentation import (PROFILE, progress_message, reply_markdown, stop_markup,
+                          usage_plain, usage_view)
+from vendor.telegram_ui import render_usage
+
+
+def format_usage(model, data, at=None, cached=False):
+    return render_usage(usage_view(model, data, cached), profile=PROFILE)
+
+
+def decorate_reply(text, model, data, at=None, cached=False):
+    return reply_markdown(text, model, data, cached)
 
 
 def fixture():
@@ -76,7 +87,7 @@ class UsageTests(unittest.TestCase):
     def test_header_and_marker_are_preserved(self):
         text='Answer\nTAGW_MEDIA: {"path":"artifacts/example.txt"}'
         message=decorate_reply(text,'gemini-test',{},None)
-        self.assertIn('⚡ **[AGY]** · `gemini-test`',message)
+        self.assertIn('⚡ **[AGY]** · gemini\\-test',message)
         self.assertNotIn('Selected model:',message)
         self.assertIn(text,message)
         self.assertIn('5h: unavailable',message)
@@ -87,11 +98,85 @@ class UsageTests(unittest.TestCase):
         data=parse_quota(fixture())
         at=datetime(2030,1,1,tzinfo=timezone.utc)
         message=decorate_reply('Synthetic body', 'gemini-test', data, at)
-        self.assertIn('`gemini-test`\n\n\u00a0\n\nSynthetic body',message)
+        self.assertIn('gemini\\-test\n\n\u00a0\n\nSynthetic body',message)
         self.assertIn('Synthetic body\n\n\u00a0\n\n> 📊',message)
         footer=format_usage('gemini-test', data, at)
         self.assertEqual(len(footer.split('\n>\n')),4)
         self.assertIn('> Context: unavailable\n>\n> 5h:',footer)
+        self.assertTrue(message.startswith('⚡ **[AGY]** · gemini\\-test\n\n'))
+
+
+class PresentationTests(unittest.TestCase):
+    def test_body_and_standalone_artifact_marker_preserved_exactly(self):
+        import tempfile
+        from artifacts import extract_artifacts
+        from vendor.telegram_ui.rendering import GAP
+        body='# Title\n\n```\nTAGW_MEDIA: {"path":"artifacts/fenced.txt"}\n```\n| a | b |\n\\*raw\\* 😀\nTAGW_MEDIA: {"path":"artifacts/out.txt"}'
+        message=reply_markdown(body,'gemini-test',{},False)
+        header,_,rest=message.partition(GAP)
+        self.assertEqual(header,'⚡ **[AGY]** · gemini\\-test')
+        self.assertTrue(rest.startswith(body+GAP+'> 📊'))
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); (root/'artifacts').mkdir(); (root/'artifacts'/'out.txt').write_text('x')
+            cleaned,media=extract_artifacts(message,root)
+        self.assertEqual([m.filename for m in media],['out.txt'])
+        self.assertIn('artifacts/fenced.txt',cleaned)
+
+    def test_invalid_or_missing_model_label_falls_back(self):
+        for model in [None,'','bad\nmodel','x'*301]:
+            message=reply_markdown('Body',model,{},False)
+            self.assertTrue(message.startswith('⚡ **[AGY]** · unavailable\n'))
+            self.assertIn('\n\nBody\n\n',message)
+
+    def test_usage_mapping_unknown_and_task_tokens_never_context(self):
+        data=parse_quota(fixture())
+        view=usage_view('gemini-test',data,True)
+        self.assertIsNone(view.context)
+        self.assertAlmostEqual(view.five_hour.remaining_percent,80.0)
+        self.assertEqual(view.five_hour.resets_at.utcoffset().total_seconds(),8*3600)
+        self.assertTrue(view.cached)
+        unknown=usage_view('example-model',data)
+        self.assertIsNone(unknown.five_hour); self.assertIsNone(unknown.weekly)
+        broken=usage_view('gemini-test',{'gemini-5h':{'left':float('nan'),'reset':None}})
+        self.assertIsNone(broken.five_hour)
+        plain=usage_plain('claude-test',data,False)
+        self.assertEqual(plain.splitlines()[:2],['📊 **Usage**','Context: unavailable'])
+        self.assertIn('5h: 80.0% used · 20.0% left · resets 01/02 11:04',plain)
+        self.assertNotIn('+0800',plain)
+        self.assertNotIn('>',plain)
+
+    def test_progress_states_markup_and_html(self):
+        text,markup=progress_message('running',100.0,'abc_123-Z',now=165.9)
+        self.assertIn('<b>任務進度</b>',text)
+        self.assertIn('<b>目前</b>：執行中',text)
+        self.assertIn('<b>已執行</b>：65 秒',text)
+        self.assertNotIn('流程',text)
+        self.assertNotIn('**',text)
+        self.assertEqual(markup,{'inline_keyboard':[[{'text':'🛑 中斷','callback_data':'stop:abc_123-Z'}]]})
+        self.assertNotIn('task:cancel',str(markup))
+        waiting,wm=progress_message('waiting',0.0,'k1',now=1.0)
+        self.assertIn('等待回覆',waiting); self.assertEqual(wm['inline_keyboard'][0][0]['callback_data'],'stop:k1')
+        delivering,dm=progress_message('delivering',0.0,'k1',now=1.0)
+        self.assertIn('Delivering',delivering); self.assertNotIn('已完成',delivering)
+        self.assertEqual(dm,{'inline_keyboard':[]})
+        unconfirmed,um=progress_message('unconfirmed',0.0,'k1',now=1.0)
+        self.assertIn('Delivery unconfirmed',unconfirmed); self.assertNotIn('已完成',unconfirmed)
+        self.assertEqual(um,{'inline_keyboard':[]})
+        for state,label in [('completed','已完成'),('cancelled','已取消'),('failed','失敗')]:
+            text,markup=progress_message(state,0.0,'k1',now=3.0)
+            self.assertIn(label,text); self.assertEqual(markup,{'inline_keyboard':[]})
+        # A clock earlier than the start never shows negative elapsed time.
+        self.assertIn('0 秒',progress_message('running',10.0,'k1',now=5.0)[0])
+        for state,key in [('unknown','k1'),('running','bad key'),('running','x'*49)]:
+            with self.assertRaises(ValueError):
+                progress_message(state,0.0,key,now=0.0)
+
+    def test_stop_translation_rejects_foreign_callbacks(self):
+        good={'inline_keyboard':[[{'text':'🛑 中斷','callback_data':'task:cancel:k1'}]]}
+        self.assertEqual(stop_markup(good,'k1')['inline_keyboard'][0][0]['callback_data'],'stop:k1')
+        for data in ['task:cancel:k2','other:k1','stop:k1']:
+            with self.assertRaises(ValueError):
+                stop_markup({'inline_keyboard':[[{'text':'x','callback_data':data}]]},'k1')
 
 
 if __name__=='__main__':

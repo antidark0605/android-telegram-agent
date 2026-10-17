@@ -16,6 +16,6 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Compile
-        run: python -m compileall -q bot.py access.py agy.py config.py telegram_api.py diagnostics.py ask_bridge.py sessions.py artifacts.py rich_delivery.py usage_footer.py incoming_photo.py tests
+        run: python -m compileall -q bot.py access.py agy.py config.py telegram_api.py diagnostics.py ask_bridge.py sessions.py artifacts.py rich_delivery.py usage_footer.py incoming_photo.py presentation.py vendor tests
       - name: Unit tests (no network or credentials)
         run: python -m unittest discover -s tests -v

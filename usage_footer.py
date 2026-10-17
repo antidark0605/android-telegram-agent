@@ -1,4 +1,4 @@
-"""Allowlisted official CLI quota data and task-scoped response decoration."""
+"""Allowlisted official CLI quota data with a short cache; see presentation.py."""
 from __future__ import annotations
 
 import json
@@ -81,28 +81,3 @@ class QuotaService:
                 self.last_fetch = time.monotonic()
                 self.at = datetime.now(LOCAL_TIMEZONE)
             return dict(self.data), self.at, cached
-
-
-def format_usage(model, data, at, cached=False):
-    prefix = ('gemini' if isinstance(model, str) and model.startswith('gemini-') else
-              '3p' if isinstance(model, str) and model.startswith(('claude-', 'gpt-')) else None)
-    lines = ['📊 **Usage**' + (' · cached' if cached else ''), 'Context: unavailable']
-    for suffix, label in [('5h', '5h'), ('weekly', 'Weekly')]:
-        row = data.get(prefix + '-' + suffix) if prefix else None
-        if row is None:
-            lines.append(label + ': unavailable')
-        else:
-            left = row['left']
-            reset = row['reset'].astimezone(LOCAL_TIMEZONE)
-            lines.append(f'{label}: {100-left:.1f}% used · {left:.1f}% left · resets {reset:%m/%d %H:%M}')
-    # Separate quote paragraphs: soft Markdown line breaks are folded by Telegram.
-    return '\n>\n'.join('> ' + line for line in lines)
-
-
-def decorate_reply(text, model, data, at, cached=False):
-    # The task model is supplied by the bot, never inferred from model prose.
-    selected = model if isinstance(model, str) and model and len(model) < 90 else 'unavailable'
-    selected = selected.replace('`', '').replace('\r', ' ').replace('\n', ' ')
-    # A nonbreaking-space paragraph retains a visible blank line in Rich output.
-    gap = '\n\n\u00a0\n\n'
-    return f'⚡ **[AGY]** · `{selected}`' + gap + text + gap + format_usage(model, data, at, cached)

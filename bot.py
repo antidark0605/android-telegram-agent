@@ -18,7 +18,8 @@ from config import ConfigError, Settings, load_settings
 from diagnostics import EventLogger
 from sessions import SessionStore, scope, write_private
 from telegram_api import TelegramAPI, TelegramError
-from usage_footer import QuotaService, decorate_reply, format_usage
+from presentation import progress_message, reply_markdown, usage_plain
+from usage_footer import QuotaService
 
 
 @dataclass
@@ -54,10 +55,6 @@ class Pending:
 def status_text(state: str, started: float, model: str | None) -> str:
     seconds = max(0, int(time.monotonic() - started))
     return f"{state} · {seconds // 60:02d}:{seconds % 60:02d}\nModel: {model or 'not selected'}"
-
-
-def stop_keyboard(key: str) -> dict:
-    return {"inline_keyboard": [[{"text": "🛑 Stop", "callback_data": "stop:" + key}]]}
 
 
 class OffsetStore:
@@ -99,10 +96,12 @@ class TelegramAgyBot:
         self.quota = QuotaService(settings.agy_command, settings.workspace)
 
     def _send(self, chat: int, text: str, thread: int | None = None,
-              markup: dict | None = None) -> int | None:
+              markup: dict | None = None, parse_mode: str | None = None) -> int | None:
         self.events.log("send_attempt", stage="send_message")
+        # Plain commands stay plain; only status messages opt into HTML.
+        extra = {"parse_mode": parse_mode} if parse_mode else {}
         try:
-            message_id = self.api.send_text(chat, text, thread, reply_markup=markup)
+            message_id = self.api.send_text(chat, text, thread, reply_markup=markup, **extra)
             self.events.log("send_ok", stage="send_message")
             return message_id
         except TelegramError as exc:
@@ -135,14 +134,30 @@ class TelegramAgyBot:
             return False
 
     def _edit(self, chat: int, message_id: int, text: str,
-              markup: dict | None = None) -> bool:
+              markup: dict | None = None, parse_mode: str | None = None) -> bool:
+        extra = {"parse_mode": parse_mode} if parse_mode else {}
         try:
-            self.api.edit_text(chat, message_id, text, markup)
+            self.api.edit_text(chat, message_id, text, markup, **extra)
             return True
         except TelegramError as exc:
             self.events.log("edit_failed", stage="edit_message", kind=exc.kind,
                             http_status=exc.http_status)
             return False
+
+    def _progress(self, task: Task, state: str) -> tuple[str, dict] | None:
+        try:
+            return progress_message(state, task.started, task.key)
+        except ValueError:
+            # Never raise from status rendering: task cleanup must still run.
+            self.events.log("edit_failed", kind="protocol", stage="edit_message")
+            return None
+
+    def _edit_status(self, task: Task, state: str) -> None:
+        """Edit the task's own status message in place, with its keyboard."""
+        payload = self._progress(task, state)
+        if payload is not None and task.message_id is not None:
+            self._edit(task.chat, task.message_id, payload[0], payload[1],
+                       parse_mode="HTML")
 
     def _ack(self, query_id: str, text: str = "") -> None:
         try:
@@ -212,7 +227,7 @@ class TelegramAgyBot:
                        "/model: choose an explicit model\n"
                        "/ls: list workspace files (ls -l)\n"
                        "/status, /context, /quota: show status\n"
-                       "Tap 🛑 Stop to interrupt running tasks.\n"
+                       "Tap 🛑 中斷 (Stop) to interrupt running tasks.\n"
                        "No collaboration or kanban.", thread)
         elif cmd == "/status":
             row = self.sessions.get(key)
@@ -305,10 +320,8 @@ class TelegramAgyBot:
 
     def _quota(self, chat: int, thread: int | None, model: str | None = None) -> None:
         try:
-            data, at, cached = self.quota.get()
-            self._send(chat, "\n".join(line.removeprefix("> ") for line in
-                                      format_usage(model, data, at, cached).splitlines()
-                                      if line != ">"), thread)
+            data, _at, cached = self.quota.get()
+            self._send(chat, usage_plain(model, data, cached), thread)
         finally:
             with self._lock:
                 self._auxiliary = False
@@ -367,16 +380,11 @@ class TelegramAgyBot:
     def _timer(self, task: Task, done: threading.Event) -> None:
         while not done.wait(5):
             with self._lock:
-                if self._active is not task:
+                if self._active is not task or task.delivering:
                     return
-                mid = task.message_id
                 waiting = (self._pending is not None and
                            self._pending.question.get("task") == task.key)
-            if mid is not None:
-                self._edit(task.chat, mid,
-                           status_text("❓ Waiting for Telegram answer" if waiting
-                                       else "⏳ Running", task.started, task.model),
-                           stop_keyboard(task.key))
+            self._edit_status(task, "waiting" if waiting else "running")
 
     def _execute(self, task: Task, prompt: str, cid: str | None) -> None:
         done = threading.Event()
@@ -385,9 +393,9 @@ class TelegramAgyBot:
         result_text = "Task failed unexpectedly."
         incoming_path = None
         try:
-            mid = self._send(task.chat,
-                             status_text("⏳ Running", task.started, task.model),
-                             task.thread, stop_keyboard(task.key))
+            payload = self._progress(task, "running")
+            mid = (self._send(task.chat, payload[0], task.thread, payload[1],
+                              parse_mode="HTML") if payload else None)
             with self._lock:
                 task.message_id = mid
             if mid is not None:
@@ -452,22 +460,20 @@ class TelegramAgyBot:
             with self._lock:
                 self._pending = None
             self.bridge.end(task.key)
-            if task.message_id is not None and ok:
-                self._edit(task.chat, task.message_id,
-                           status_text("📤 Delivering", task.started, task.model))
             if ok:
-                data, at, cached = self.quota.get()
-                result_text = decorate_reply(result_text, task.model, data, at, cached)
+                self._edit_status(task, "delivering")
+                data, _at, cached = self.quota.get()
+                # The header names the task's own model, not the topic's current one.
+                result_text = reply_markdown(result_text, task.model, data, cached)
             delivered = self._send_output(task.chat, result_text, task.thread) if ok else True
             if not ok:
                 self._send(task.chat, "Task failed: " + result_text, task.thread)
-            if task.message_id is not None:
-                label = ("✅ Completed" if ok and delivered else
-                         "⚠️ Delivery unconfirmed" if ok else
-                         "🛑 Stopped" if task.runner._cancelled.is_set()
-                         else "❌ Failed")
-                self._edit(task.chat, task.message_id,
-                           status_text(label, task.started, task.model))
+            # Completed only after Telegram acknowledged the answer; terminal
+            # states carry an empty keyboard, removing Stop.
+            self._edit_status(task, "completed" if ok and delivered else
+                              "unconfirmed" if ok else
+                              "cancelled" if task.runner._cancelled.is_set()
+                              else "failed")
             task_kind = ("success" if ok else
                          "stopped" if task.runner._cancelled.is_set() else "failed")
             self.events.log("task_finished", kind=task_kind, stage="agy",

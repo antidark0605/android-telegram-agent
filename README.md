@@ -1,6 +1,6 @@
 # android-telegram-agent
 
-Revision: 4 — 2026-10-14
+Revision: 5 — 2026-10-17
 
 Small non-root **Termux + Telegram + official AGY CLI** Bot for Android. Original Python standard-library code, not a port of another private codebase. No root, inbound ports, OpenClaw, collaboration, kanban, server framework, or pip dependencies.
 
@@ -20,9 +20,9 @@ Small non-root **Termux + Telegram + official AGY CLI** Bot for Android. Origina
 | /ls | List the configured workspace using `ls -l`, without arbitrary arguments |
 | /context | Show last task's accounting tokens; **not** an invented context occupancy percentage |
 | /quota, /usage | Request AGY's standalone /usage rate-limit report, if supported |
-| Inline 🛑 Stop | Cancel that active AGY task; no /cancel command |
+| Inline 🛑 中斷 (Stop) | Cancel that active AGY task; no /cancel command |
 
-Each task sends one `⏳ Running · MM:SS` status message with 🛑 Stop, edited around every five seconds, and a separate final answer. Stop is tied to the authorized user, chat, exact status-message ID and unique task key. Once finished, the button is removed. One AGY process at a time prevents memory spikes on small devices.
+Each task sends one formatted progress status message (state and elapsed seconds) with 🛑 中斷 (Stop), edited in place around every five seconds, and a separate final answer. Stop is tied to the authorized user, chat, exact status-message ID and unique task key. While the answer is being delivered the status shows *Delivering* without Stop; it shows completed only after Telegram acknowledges the answer, otherwise *Delivery unconfirmed*. Once finished, the button is removed. `/status` remains a plain-text summary. One AGY process at a time prevents memory spikes on small devices.
 
 **Topics:** A fresh chat/Topic requires `/session start` before ordinary text can run AGY. This activates the current scope; it does not create a Telegram Topic. A pre-existing saved AGY conversation remains activated. The private chat (no Topic) has its own separate Session. Each Telegram `message_thread_id` has a separate AGY conversation ID, Model selection and last task token accounting. A new Topic does not require creating another Bot Token. `/new` resets only the current Topic. Restarting the Bot preserves its Session mappings in a private JSON file. Invalid/corrupted state stops startup rather than silently erasing conversations; a failed persistence operation never updates the in-memory mapping.
 
@@ -36,7 +36,7 @@ On Bot startup, `AskBridge.install()` merges the single `telegram-ask` server in
 
 ## Rich message and artifacts (v0.2 candidate)
 
-The final **AGY response** is delivered via Telegram Bot API **10.3** \`sendRichMessage\`: headings, emphasis, lists, code blocks and tables are handled natively from \`rich_message.markdown\`. The running timer, inline Stop button, slash commands and Ask Telegram question still use the existing message API, so their behavior does not change.
+The final **AGY response** is delivered via Telegram Bot API **10.3** \`sendRichMessage\`: headings, emphasis, lists, code blocks and tables are handled natively from \`rich_message.markdown\`. Slash commands and Ask Telegram questions still use the existing plain message API. The progress status message uses `sendMessage`/`editMessageText` with `parse_mode=HTML` (escaped text) and its inline keyboard; see Shared UI presentation below.
 
 The Bot will attach a file only when the agent **explicitly declares it** on its own line in the final answer. For example, after creating a synthetic PDF under the workspace's \`artifacts/\` directory:
 
@@ -81,7 +81,7 @@ See [Termux setup](docs/termux-setup.md) and the optional [media conversion guid
 | Dependency | Installation | Notes |
 | --- | --- | --- |
 | Termux App | Official Termux source | Run as the ordinary Android App UID, **not root** |
-| Python 3.10+ | `pkg install python` | The Bot only imports standard-library modules |
+| Python 3.10+ | `pkg install python` | The Bot only imports standard-library modules and the vendored `vendor/telegram_ui` sources |
 | Official Android ARM64 AGY CLI | Official CLI installation and authentication | `command -v agy`; confirm `agy -p "ping" --output-format json` works |
 | Telegram Bot Token | Obtain from BotFather | Use a dedicated Bot and an explicit user/chat allowlist |
 | Git | `pkg install git` | Only needed for cloning/updating files |
@@ -213,6 +213,36 @@ command payload; it is not parsed as a model-written quota answer.
 Response headers and Usage footers retain a blank spacer paragraph around the
 answer. Each Usage row is a separate quotation paragraph so Rich Markdown does
 not fold soft line breaks into one continuous sentence.
+
+## Shared UI presentation
+
+Revision 1 — 2026-10-17. Reply identity, Usage and progress text are rendered
+by the vendored public library in `vendor/telegram_ui` (telegram-agent-ui
+v0.2.0, pinned commit and MIT license in [vendor/README.md](vendor/README.md)).
+The sources are unmodified and pure standard-library Python; no `pip install`
+is needed. `presentation.py` maps Bot state onto it:
+
+- Final answers use `render_reply`: the header names the model the task ran
+  with (Markdown-escaped; invalid labels show `unavailable`), the AGY answer
+  body follows unchanged so standalone `TAGW_MEDIA` markers are still
+  extracted, then the `render_usage` footer. Quota numbers and reset times come
+  only from the existing `/usage` parser and 60-second cache; no extra call is
+  made. Context stays unavailable: task token totals are not occupancy.
+- Progress uses `render_progress` without a flow line (AGY reports no stage
+  events) for running, waiting, completed, cancelled and failed. *Delivering*
+  is shown as running with a delivery activity line and no Stop button;
+  *Delivery unconfirmed* is a terminal failed state with an explicit line and
+  is never shown as completed. The upstream `task:cancel:<id>` button is
+  translated to the Bot's `stop:<id>`; all Stop checks are unchanged.
+- The status Markdown is converted with the conservative HTML fallback used for
+  rich-delivery fallbacks. If Telegram rejects the Rich answer, that fallback
+  shows the header's Markdown escapes (for example `gemini\-x`) literally.
+- Plain-text messages are split with the library's UTF-16-aware `split_text`,
+  so emoji and other non-BMP characters count as Telegram counts them and are
+  never cut. It preserves every character but does not repair Markdown, code
+  fences or tables across chunk boundaries.
+
+Device rendering of the new status and header formats has not been verified.
 
 ## Incoming photos
 
