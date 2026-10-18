@@ -12,10 +12,13 @@ auth*
 *.sqlite*
 *.db
 sessions.json
+last.json
 session-state/
 logs/
 evidence/
 artifacts/
+incoming-images/
+incoming-media/
 *.log
 *.apk
 *.tar.gz

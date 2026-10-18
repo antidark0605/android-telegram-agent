@@ -62,6 +62,7 @@ class SessionStore:
             row = self.data.get(key, {})
             candidate = dict(self.data)
             candidate[key] = {"model": row.get("model"),
+                              "display_mode": row.get("display_mode", "rich"),
                               "started": row.get("started") is True or bool(row.get("conversation_id"))}
             write_private(self.path, candidate)
             self.data = candidate

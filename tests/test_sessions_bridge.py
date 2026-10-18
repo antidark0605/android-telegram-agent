@@ -17,7 +17,7 @@ class SessionTests(unittest.TestCase):
             file = Path(td) / "sessions.json"
             s = SessionStore(file)
             one, two = scope(123, 456, 1), scope(123, 456, 2)
-            s.change(one, conversation_id="conv-first")
+            s.change(one, conversation_id="conv-first", display_mode="classic")
             s.change(two, conversation_id="conv-second")
             self.assertEqual(s.get(one)["conversation_id"], "conv-first")
             self.assertEqual(SessionStore(file).get(two)["conversation_id"], "conv-second")
@@ -25,6 +25,7 @@ class SessionTests(unittest.TestCase):
             s.reset(one)
             self.assertEqual(s.get(two)["conversation_id"], "conv-second")
             self.assertNotIn("conversation_id", s.get(one))
+            self.assertEqual(s.get(one)["display_mode"], "classic")
 
 
     def test_transactional_session_state(self):

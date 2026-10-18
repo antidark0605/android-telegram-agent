@@ -124,6 +124,64 @@ class MessageTests(unittest.TestCase):
     def test_empty_message(self):
         self.assertEqual(split_text(""), ["(empty response)"])
 
+    def test_non_bmp_emoji_respect_utf16_limit(self):
+        from vendor.telegram_ui import utf16_length
+        text = "😀" * 5000 + "\n" + "a😀\n" * 10
+        parts = split_text(text)
+        self.assertEqual("".join(parts), text)
+        self.assertTrue(all(utf16_length(part) <= 3800 for part in parts))
+        # An emoji (two UTF-16 units) is never cut in half.
+        self.assertEqual(split_text("😀😀😀", limit=2), ["😀", "😀", "😀"])
+        self.assertEqual(split_text("ab\ncd\n", limit=4), ["ab\n", "cd\n"])
+
+    def test_formatted_status_send_and_edit_carry_markup(self):
+        api = TelegramAPI("dummy-token")
+        markup = {"inline_keyboard": [[{"text": "🛑", "callback_data": "stop:k1"}]]}
+        with patch.object(api, "_call", return_value={"message_id": 5}) as call:
+            api.send_text(1, "<b>x</b>\n" + "y" * 3900, 2, reply_markup=markup,
+                          parse_mode="HTML")
+            self.assertEqual(call.call_count, 1)  # HTML tags are never split.
+            sent = call.call_args.args[1]
+            self.assertEqual((sent["parse_mode"], sent["reply_markup"],
+                              sent["message_thread_id"]), ("HTML", markup, 2))
+            api.edit_text(1, 5, "<b>x</b>", markup, parse_mode="HTML")
+            edited = call.call_args.args[1]
+            self.assertEqual((edited["parse_mode"], edited["reply_markup"],
+                              edited["message_id"]), ("HTML", markup, 5))
+            api.send_text(1, "plain *text*")
+            self.assertNotIn("parse_mode", call.call_args.args[1])
+            api.edit_text(1, 5, "plain")
+            self.assertNotIn("parse_mode", call.call_args.args[1])
+
+    def test_formatted_text_utf16_size_guard(self):
+        from telegram_api import TelegramError
+        from vendor.telegram_ui import utf16_length
+        api = TelegramAPI("dummy-token")
+        # 7 units of tags + 2044 emoji (2 units each) + 1 = exactly 4096 units.
+        exact = "<b>" + "😀" * 2044 + "y" + "</b>"
+        over = "<b>" + "😀" * 2044 + "yy" + "</b>"
+        self.assertEqual(utf16_length(exact), 4096)
+        self.assertLess(len(over), 4096)  # Code points alone would pass.
+        with patch.object(api, "_call", return_value={"message_id": 5}) as call:
+            api.send_text(1, exact, parse_mode="HTML")
+            self.assertEqual(call.call_args.args[1]["text"], exact)
+            api.edit_text(1, 5, exact, parse_mode="HTML")
+            self.assertEqual(call.call_args.args[1]["text"], exact)
+            self.assertEqual(call.call_count, 2)
+        for send in (lambda: api.send_text(1, over, 2, parse_mode="HTML"),
+                     lambda: api.edit_text(1, 5, over, parse_mode="HTML")):
+            with patch.object(api, "_call") as call:
+                with self.assertRaises(TelegramError) as ctx:
+                    send()
+            call.assert_not_called()
+            self.assertEqual(ctx.exception.kind, "protocol")
+            self.assertNotIn("😀", str(ctx.exception))
+            self.assertNotIn("dummy-token", str(ctx.exception))
+        # Plain text of the same size is still chunked, not rejected.
+        with patch.object(api, "_call", return_value={"message_id": 6}) as call:
+            api.send_text(1, over)
+            self.assertEqual(call.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
