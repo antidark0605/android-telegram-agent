@@ -8,17 +8,32 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from access import TelegramAccess, identity_reply
-from incoming_photo import select_photo, download_photo
+from incoming_media import download_media, select_document, select_photo
+from incoming_photo import download_photo
 from agy import AgyRunner, list_models
 from ask_bridge import AskBridge
 from config import ConfigError, Settings, load_settings
 from diagnostics import EventLogger
+from last_store import LastStore
+from lifecycle_store import LifecycleStore
 from sessions import SessionStore, scope, write_private
 from telegram_api import TelegramAPI, TelegramError
-from usage_footer import QuotaService, decorate_reply, format_usage
+from presentation import (DISPLAY_LABELS, DISPLAY_MODES, display_keyboard,
+                          normalize_display_mode, progress_message,
+                          render_response, usage_plain)
+from usage_footer import QuotaService
+from vendor.telegram_ui.service_lifecycle import (ServiceLifecycleView,
+                                                   render_service_lifecycle)
+from rich_delivery import _html_fallback
+
+ATTACHMENT_FIELDS = frozenset({
+    "photo", "document", "audio", "video", "animation", "voice",
+    "video_note", "sticker",
+})
 
 
 @dataclass
@@ -34,6 +49,7 @@ class Task:
     message_id: int | None = None
     delivering: bool = False
     photo: dict | None = None
+    display_mode: str = "rich"
 
 
 @dataclass
@@ -43,6 +59,7 @@ class Picker:
     thread: int | None
     message_id: int
     options: list[tuple[str, str]]
+    kind: str = "model"
 
 
 @dataclass
@@ -54,10 +71,6 @@ class Pending:
 def status_text(state: str, started: float, model: str | None) -> str:
     seconds = max(0, int(time.monotonic() - started))
     return f"{state} · {seconds // 60:02d}:{seconds % 60:02d}\nModel: {model or 'not selected'}"
-
-
-def stop_keyboard(key: str) -> dict:
-    return {"inline_keyboard": [[{"text": "🛑 Stop", "callback_data": "stop:" + key}]]}
 
 
 class OffsetStore:
@@ -89,6 +102,8 @@ class TelegramAgyBot:
         self.state = OffsetStore(settings.state_path)
         self.sessions = SessionStore(settings.config_path.parent / "sessions.json")
         self.bridge = AskBridge(settings.config_path.parent / "ask-bridge")
+        self.last = LastStore(settings.config_path.parent / "last.json")
+        self.lifecycle = LifecycleStore(settings.config_path.parent / "lifecycle.json")
         self._lock = threading.RLock()
         self._active: Task | None = None
         self._worker: threading.Thread | None = None
@@ -96,13 +111,18 @@ class TelegramAgyBot:
         self._pending: Pending | None = None
         self._auxiliary = False
         self._stop = threading.Event()
+        self._running = False
+        self._started_at = datetime.now(timezone.utc)
+        self._lifecycle_attempted: set[tuple[int, int]] = set()
         self.quota = QuotaService(settings.agy_command, settings.workspace)
 
     def _send(self, chat: int, text: str, thread: int | None = None,
-              markup: dict | None = None) -> int | None:
+              markup: dict | None = None, parse_mode: str | None = None) -> int | None:
         self.events.log("send_attempt", stage="send_message")
+        # Plain commands stay plain; only status messages opt into HTML.
+        extra = {"parse_mode": parse_mode} if parse_mode else {}
         try:
-            message_id = self.api.send_text(chat, text, thread, reply_markup=markup)
+            message_id = self.api.send_text(chat, text, thread, reply_markup=markup, **extra)
             self.events.log("send_ok", stage="send_message")
             return message_id
         except TelegramError as exc:
@@ -110,14 +130,18 @@ class TelegramAgyBot:
                             http_status=exc.http_status)
             return None
 
-    def _send_output(self, chat: int, text: str, thread: int | None = None) -> bool:
-        """Post an AGY answer as Rich Markdown with verified artifacts."""
+    def _send_output(self, chat: int, text: str, thread: int | None = None,
+                     mode: str = "rich") -> bool:
+        """Post one already-rendered answer using its explicit display mode."""
         from artifacts import extract_artifacts
         cleaned, media = extract_artifacts(text, self.settings.workspace)
         self.events.log("send_attempt", stage="send_message")
         try:
-            if hasattr(self.api, "send_rich"):
+            mode = normalize_display_mode(mode)
+            if mode == "rich" and hasattr(self.api, "send_rich"):
                 message_id = self.api.send_rich(chat, cleaned, thread, artifacts=media)
+            elif hasattr(self.api, "send_classic"):
+                message_id = self.api.send_classic(chat, cleaned, thread, artifacts=media)
             else:
                 # Simple in-memory test transports may only implement send_text.
                 message_id = self.api.send_text(chat, cleaned, thread)
@@ -134,15 +158,78 @@ class TelegramAgyBot:
             self.events.log("send_failed", stage="send_message", kind="storage")
             return False
 
-    def _edit(self, chat: int, message_id: int, text: str,
-              markup: dict | None = None) -> bool:
+    def _record_destination(self, user: int, chat: int, thread: int | None) -> None:
+        """Persist the latest Topic for one already-authorized user/chat pair."""
         try:
-            self.api.edit_text(chat, message_id, text, markup)
+            self.lifecycle.remember(user, chat, thread)
+        except (OSError, ValueError, TypeError):
+            self.events.log("lifecycle_failed", kind="storage", stage="destination_save")
+
+    def _notify_lifecycle(self) -> None:
+        """Notify prior used destinations once after polling state is ready."""
+        try:
+            state, targets = self.lifecycle.begin_instance()
+        except (OSError, ValueError, TypeError):
+            self.events.log("lifecycle_failed", kind="storage", stage="startup_state")
+            return
+        try:
+            notice = render_service_lifecycle(ServiceLifecycleView(
+                agent_label="AGY", state=state,
+                started_at=self._started_at, reason=None))
+            rendered = _html_fallback(notice)
+        except (TypeError, ValueError):
+            self.events.log("lifecycle_failed", kind="protocol", stage="startup_notice")
+            return
+        for user, chat, thread in targets:
+            pair = (user, chat)
+            # Mark before sending: a lost acknowledgement must not cause an
+            # automatic duplicate within this process instance.
+            with self._lock:
+                if pair in self._lifecycle_attempted:
+                    continue
+                self._lifecycle_attempted.add(pair)
+            if not self.access.is_allowed(user, chat):
+                continue
+            try:
+                sent = self._send(chat, rendered, thread, parse_mode="HTML")
+            except Exception:
+                # Lifecycle delivery is advisory and must never block polling.
+                sent = None
+            if sent is None:
+                self.events.log("lifecycle_failed", kind="unconfirmed",
+                                stage="startup_notice")
+
+    def _save_last(self, key: str, text: str, mode: str) -> None:
+        try:
+            self.last.save(key, text, normalize_display_mode(mode))
+        except (OSError, ValueError, TypeError):
+            self.events.log("last_response_failed", kind="storage", stage="last_save")
+
+    def _edit(self, chat: int, message_id: int, text: str,
+              markup: dict | None = None, parse_mode: str | None = None) -> bool:
+        extra = {"parse_mode": parse_mode} if parse_mode else {}
+        try:
+            self.api.edit_text(chat, message_id, text, markup, **extra)
             return True
         except TelegramError as exc:
             self.events.log("edit_failed", stage="edit_message", kind=exc.kind,
                             http_status=exc.http_status)
             return False
+
+    def _progress(self, task: Task, state: str) -> tuple[str, dict] | None:
+        try:
+            return progress_message(state, task.started, task.key)
+        except ValueError:
+            # Never raise from status rendering: task cleanup must still run.
+            self.events.log("edit_failed", kind="protocol", stage="edit_message")
+            return None
+
+    def _edit_status(self, task: Task, state: str) -> None:
+        """Edit the task's own status message in place, with its keyboard."""
+        payload = self._progress(task, state)
+        if payload is not None and task.message_id is not None:
+            self._edit(task.chat, task.message_id, payload[0], payload[1],
+                       parse_mode="HTML")
 
     def _ack(self, query_id: str, text: str = "") -> None:
         try:
@@ -167,13 +254,19 @@ class TelegramAgyBot:
         thread = message.get("message_thread_id")
         if type(thread) is not int:
             thread = None
+        attachment_present = any(field in message for field in ATTACHMENT_FIELDS)
         photo = select_photo(message.get("photo"))
-        content = (message.get("caption") or "請查看附圖並描述其內容。") if photo else message.get("text")
-        if not isinstance(content, str) or not content.strip():
+        document = None if photo else select_document(message.get("document"))
+        incoming = photo or document
+        content = ((message.get("caption") or "請查看附圖或文件並描述其內容。")
+                   if incoming else message.get("text"))
+        if incoming is None and attachment_present:
+            content = ""
+        elif not isinstance(content, str) or not content.strip():
             return
-        text = content.strip()
+        text = content.strip() if isinstance(content, str) else ""
         cmd, _, arg = text.partition(" ")
-        cmd = "" if photo else cmd.split("@", 1)[0].lower()
+        cmd = "" if incoming else cmd.split("@", 1)[0].lower()
         authorized = self.access.is_allowed(user, chat_id)
         if cmd == "/myid":
             if not self.access.may_discover_ids(
@@ -182,6 +275,7 @@ class TelegramAgyBot:
                 return
             if authorized:
                 self.events.log("inbound_authorized", kind="message")
+                self._record_destination(user, chat_id, thread)
             chat_type = chat.get("type")
             if chat_type not in ("private", "group", "supergroup", "channel"):
                 chat_type = "unknown"
@@ -190,12 +284,17 @@ class TelegramAgyBot:
         if not authorized:
             return  # Nothing, including AGY/Ask/commands, for unlisted pairs.
         self.events.log("inbound_authorized", kind="message")
+        self._record_destination(user, chat_id, thread)
+        if attachment_present and incoming is None:
+            self._send(chat_id, "Unsupported attachment. Send one supported photo or document "
+                       "within the allowed file type and size limits.", thread)
+            return
         key = scope(user, chat_id, thread)
         with self._lock:
             pending = self._pending
             active = self._active
-        if photo and pending and active:
-            self._send(chat_id, "請先用文字回答目前的提問，再傳圖片。", thread)
+        if incoming and pending and active:
+            self._send(chat_id, "請先用文字回答目前的提問，再傳送附件。", thread)
             return
         # While an AGY MCP question is pending, free text is an answer.
         if (pending and active and pending.question["task"] == active.key
@@ -210,9 +309,11 @@ class TelegramAgyBot:
                        "/myid: show your user/chat/topic IDs\n"
                        "/new: start new conversation in this topic\n"
                        "/model: choose an explicit model\n"
+                       "/display: choose rich/classic/raw reply display\n"
+                       "/last: manually resend the last saved reply\n"
                        "/ls: list workspace files (ls -l)\n"
                        "/status, /context, /quota: show status\n"
-                       "Tap 🛑 Stop to interrupt running tasks.\n"
+                       "Tap 🛑 中斷 (Stop) to interrupt running tasks.\n"
                        "No collaboration or kanban.", thread)
         elif cmd == "/status":
             row = self.sessions.get(key)
@@ -222,6 +323,7 @@ class TelegramAgyBot:
                        f"\nLast reported model: {row.get('last_actual_model') or 'not reported by AGY'}"
                        f"\nCWD: {self.settings.workspace}"
                        f"\nNative session ID: {row.get('conversation_id') or 'pending (created on first task)'}"
+                       f"\nDisplay: {normalize_display_mode(row.get('display_mode'))}"
                        f"\nYOLO: {'enabled' if self.settings.yolo else 'disabled'}", thread)
         elif cmd == "/session":
             if arg.strip().lower() != "start":
@@ -254,6 +356,10 @@ class TelegramAgyBot:
                 self._send(chat_id, "Use /model and choose an explicit model.", thread)
             else:
                 self._models(user, chat_id, thread, key)
+        elif cmd == "/display":
+            self._display(user, chat_id, thread, key, arg.strip())
+        elif cmd == "/last":
+            self._last_reply(chat_id, thread, key)
         elif cmd == "/ls":
             if arg.strip():
                 self._send(chat_id, "Use /ls without arguments: lists this workspace only.", thread)
@@ -279,12 +385,12 @@ class TelegramAgyBot:
             else:
                 threading.Thread(target=self._quota, args=(chat_id, thread, self.sessions.get(key).get("model")),
                                  daemon=True, name="agy-quota").start()
-        elif text.startswith("/") and photo is None:
+        elif text.startswith("/") and incoming is None:
             self._send(chat_id, "Unknown command. Try /help.", thread)
         elif len(text) > 4000:
             self._send(chat_id, "Prompt exceeds 4000 characters.", thread)
         else:
-            self._start_task(text, user, chat_id, thread, key, photo=photo)
+            self._start_task(text, user, chat_id, thread, key, photo=incoming)
 
     def _list_workspace(self, chat: int, thread: int | None) -> None:
         try:
@@ -305,10 +411,8 @@ class TelegramAgyBot:
 
     def _quota(self, chat: int, thread: int | None, model: str | None = None) -> None:
         try:
-            data, at, cached = self.quota.get()
-            self._send(chat, "\n".join(line.removeprefix("> ") for line in
-                                      format_usage(model, data, at, cached).splitlines()
-                                      if line != ">"), thread)
+            data, _at, cached = self.quota.get()
+            self._send(chat, usage_plain(model, data, cached), thread)
         finally:
             with self._lock:
                 self._auxiliary = False
@@ -335,6 +439,40 @@ class TelegramAgyBot:
             with self._lock:
                 self._picker = Picker(user, chat, thread, mid, options)
 
+    def _display(self, user: int, chat: int, thread: int | None, key: str,
+                 requested: str = "") -> None:
+        with self._lock:
+            busy = self._active is not None or self._auxiliary
+        if busy:
+            self._send(chat, "Display selection is unavailable during an active task.", thread)
+            return
+        if requested:
+            if requested not in DISPLAY_MODES:
+                self._send(chat, "Use /display with rich, classic or raw.", thread)
+                return
+            try:
+                self.sessions.change(key, display_mode=requested)
+            except (OSError, ValueError):
+                self._send(chat, "Display mode could not be saved.", thread)
+            else:
+                self._send(chat, "Reply display: " + DISPLAY_LABELS[requested], thread)
+            return
+        current = normalize_display_mode(self.sessions.get(key).get("display_mode"))
+        mid = self._send(chat, "Reply display for this chat/topic: "
+                         + DISPLAY_LABELS[current], thread, display_keyboard(current))
+        if mid:
+            with self._lock:
+                self._picker = Picker(user, chat, thread, mid,
+                                      [(mode, DISPLAY_LABELS[mode]) for mode in DISPLAY_MODES],
+                                      kind="display")
+
+    def _last_reply(self, chat: int, thread: int | None, key: str) -> None:
+        row = self.last.get(key)
+        if row is None:
+            self._send(chat, "No saved reply for this chat/topic.", thread)
+            return
+        self._send_output(chat, row["text"], thread, row.get("mode", "rich"))
+
     def _start_task(self, prompt: str, user: int, chat: int,
                     thread: int | None, key: str, photo: dict | None = None) -> None:
         with self._lock:
@@ -352,8 +490,10 @@ class TelegramAgyBot:
                 runner = AgyRunner(self.settings.agy_command, self.settings.workspace,
                                    self.settings.task_timeout_seconds,
                                    self.settings.print_timeout)
+                display_mode = normalize_display_mode(row.get("display_mode"))
                 task = Task(secrets.token_hex(8), user, chat, thread, key, runner,
-                            row.get("model"), time.monotonic(), photo=photo)
+                            row.get("model"), time.monotonic(), photo=photo,
+                            display_mode=display_mode)
                 self._active = task
                 self.events.log("task_started", stage="agy")
                 self._worker = threading.Thread(
@@ -367,16 +507,11 @@ class TelegramAgyBot:
     def _timer(self, task: Task, done: threading.Event) -> None:
         while not done.wait(5):
             with self._lock:
-                if self._active is not task:
+                if self._active is not task or task.delivering:
                     return
-                mid = task.message_id
                 waiting = (self._pending is not None and
                            self._pending.question.get("task") == task.key)
-            if mid is not None:
-                self._edit(task.chat, mid,
-                           status_text("❓ Waiting for Telegram answer" if waiting
-                                       else "⏳ Running", task.started, task.model),
-                           stop_keyboard(task.key))
+            self._edit_status(task, "waiting" if waiting else "running")
 
     def _execute(self, task: Task, prompt: str, cid: str | None) -> None:
         done = threading.Event()
@@ -385,9 +520,9 @@ class TelegramAgyBot:
         result_text = "Task failed unexpectedly."
         incoming_path = None
         try:
-            mid = self._send(task.chat,
-                             status_text("⏳ Running", task.started, task.model),
-                             task.thread, stop_keyboard(task.key))
+            payload = self._progress(task, "running")
+            mid = (self._send(task.chat, payload[0], task.thread, payload[1],
+                              parse_mode="HTML") if payload else None)
             with self._lock:
                 task.message_id = mid
             if mid is not None:
@@ -401,11 +536,17 @@ class TelegramAgyBot:
             if not folder.is_dir():
                 raise ValueError("Artifact directory is not a directory")
             if task.photo is not None:
-                incoming_path = download_photo(self.api, task.photo, self.settings.workspace,
-                                               cancelled=task.runner._cancelled)
-                prompt += ("\n\n使用者附圖已下載到本機：" + str(incoming_path)
-                           + "\n請使用圖片查看工具讀取此圖，不要僅依檔名猜測。"
-                           + "\n這是使用者傳入的圖片；不要將它當成待傳送產物。")
+                if task.photo.get("kind") in (None, "photo"):
+                    incoming_path = download_photo(
+                        self.api, task.photo, self.settings.workspace,
+                        cancelled=task.runner._cancelled)
+                else:
+                    incoming_path = download_media(
+                        self.api, task.photo, self.settings.workspace,
+                        cancelled=task.runner._cancelled)
+                prompt += ("\n\n使用者附件已下載到本機：" + str(incoming_path)
+                           + "\n請使用圖片或檔案查看工具讀取此附件，不要僅依檔名猜測。"
+                           + "\n這是使用者傳入的附件；不要將它當成待傳送產物。")
             self.bridge.begin(task.key, task.owner, task.chat, task.thread)
             ask_hint = ("\n\nIf a user decision is required, use the "
                         "telegram-ask MCP tool ask_telegram with a detailed question "
@@ -452,22 +593,27 @@ class TelegramAgyBot:
             with self._lock:
                 self._pending = None
             self.bridge.end(task.key)
-            if task.message_id is not None and ok:
-                self._edit(task.chat, task.message_id,
-                           status_text("📤 Delivering", task.started, task.model))
+            rendered = result_text
             if ok:
-                data, at, cached = self.quota.get()
-                result_text = decorate_reply(result_text, task.model, data, at, cached)
-            delivered = self._send_output(task.chat, result_text, task.thread) if ok else True
+                self._edit_status(task, "delivering")
+                data, _at, cached = ({}, None, False)
+                if task.display_mode != "raw":
+                    data, _at, cached = self.quota.get()
+                # The header names the task's own model, not the topic's current one.
+                rendered = render_response(result_text, task.model, data, cached,
+                                           task.display_mode)
+            self._save_last(task.session_key, rendered if ok else result_text,
+                            task.display_mode if ok else "raw")
+            delivered = (self._send_output(task.chat, rendered, task.thread,
+                                           task.display_mode) if ok else True)
             if not ok:
                 self._send(task.chat, "Task failed: " + result_text, task.thread)
-            if task.message_id is not None:
-                label = ("✅ Completed" if ok and delivered else
-                         "⚠️ Delivery unconfirmed" if ok else
-                         "🛑 Stopped" if task.runner._cancelled.is_set()
-                         else "❌ Failed")
-                self._edit(task.chat, task.message_id,
-                           status_text(label, task.started, task.model))
+            # Completed only after Telegram acknowledged the answer; terminal
+            # states carry an empty keyboard, removing Stop.
+            self._edit_status(task, "completed" if ok and delivered else
+                              "unconfirmed" if ok else
+                              "cancelled" if task.runner._cancelled.is_set()
+                              else "failed")
             task_kind = ("success" if ok else
                          "stopped" if task.runner._cancelled.is_set() else "failed")
             self.events.log("task_finished", kind=task_kind, stage="agy",
@@ -532,21 +678,28 @@ class TelegramAgyBot:
         if not isinstance(chat, dict):
             return
         uid, cid, mid = who.get("id"), chat.get("id"), msg.get("message_id")
+        thread = msg.get("message_thread_id")
+        if type(thread) is not int:
+            thread = None
         if (type(mid) is not int or not self.access.is_allowed(uid, cid)
                 or who.get("is_bot") is True):
             return
         data, qid = cb.get("data"), cb.get("id")
-        if not isinstance(data, str) or not isinstance(qid, str):
+        if (not isinstance(data, str) or len(data.encode("utf-8")) > 64
+                or not isinstance(qid, str) or not qid):
             return
         action = "stop" if data.startswith("stop:") else (
             "model" if data.startswith("model:") else
+            "display" if data.startswith("display:") else
             "ask" if data.startswith("ask:") else "other")
         self.events.log("callback_authorized", kind=action)
+        self._record_destination(uid, cid, thread)
         if data.startswith("stop:"):
             with self._lock:
                 task = self._active
                 valid = (task is not None and task.key == data[5:]
                          and task.owner == uid and task.chat == cid
+                         and task.thread == thread
                          and task.message_id == mid
                          and not task.delivering)
             accepted = bool(valid and task.runner.cancel())
@@ -560,7 +713,8 @@ class TelegramAgyBot:
                 picker = self._picker
                 busy = self._active is not None or self._auxiliary
                 valid = (picker is not None and picker.user == uid
-                         and picker.chat == cid and picker.message_id == mid)
+                         and picker.chat == cid and picker.thread == thread
+                         and picker.kind == "model" and picker.message_id == mid)
                 if valid and not busy and data[6:].isascii() and data[6:].isdecimal():
                     idx = int(data[6:])
                     model = picker.options[idx][0] if idx < len(picker.options) else False
@@ -583,6 +737,27 @@ class TelegramAgyBot:
             else:
                 self._ack(qid, "Model updated.")
                 self._edit(cid, mid, f"Model: {model or 'not selected'}")
+        elif data.startswith("display:"):
+            mode = data[8:]
+            with self._lock:
+                picker = self._picker
+                busy = self._active is not None or self._auxiliary
+                valid = (picker is not None and picker.kind == "display"
+                         and picker.user == uid and picker.chat == cid
+                         and picker.thread == thread and picker.message_id == mid
+                         and mode in DISPLAY_MODES)
+                if valid and not busy:
+                    try:
+                        self.sessions.change(scope(uid, cid, thread), display_mode=mode)
+                    except (OSError, ValueError):
+                        valid = False
+                    else:
+                        self._picker = None
+            if not valid:
+                self._ack(qid, "Display menu expired or task is running.")
+            else:
+                self._ack(qid, "Display mode updated.")
+                self._edit(cid, mid, "Reply display: " + DISPLAY_LABELS[mode])
         elif data.startswith("ask:"):
             with self._lock:
                 pending, task = self._pending, self._active
@@ -590,7 +765,9 @@ class TelegramAgyBot:
                 valid = (pending is not None and task is not None
                          and len(fields) == 3 and fields[1] == pending.question["id"][:16]
                          and pending.message_id == mid and task.key == pending.question["task"]
-                         and uid == task.owner and cid == task.chat)
+                         and uid == task.owner and cid == task.chat
+                         and thread == task.thread
+                         and pending.question.get("topic") == thread)
                 opts = pending.question["choices"] if valid else []
                 idx = int(fields[2]) if fields[-1].isascii() and fields[-1].isdecimal() else -1
             if valid and 0 <= idx < len(opts):
@@ -601,7 +778,6 @@ class TelegramAgyBot:
 
     def run(self) -> None:
         self.bridge.install(self.settings.workspace)
-        self.events.log("bot_started", stage="startup")
         try:
             offset = self.state.read()
         except (OSError, ValueError):
@@ -616,6 +792,14 @@ class TelegramAgyBot:
             except OSError:
                 self.events.log("offset_failed", kind="storage", stage="startup")
                 raise
+        with self._lock:
+            self._running = True
+        self.events.log("bot_started", stage="startup")
+        try:
+            self._notify_lifecycle()
+        except Exception:
+            # This advisory path cannot make an otherwise ready poller fail.
+            self.events.log("lifecycle_failed", kind="unknown", stage="startup_notice")
         print("Telegram polling started (AGY on demand).", flush=True)
         backoff = 2
         last_heartbeat = time.monotonic() - 60.0
@@ -625,10 +809,11 @@ class TelegramAgyBot:
                 try:
                     updates = self.api.get_updates(offset, timeout=3)
                 except TelegramError as exc:
+                    delay = exc.retry_after if exc.retry_after is not None else backoff
                     self.events.log("poll_failed", kind=exc.kind, stage="get_updates",
-                                    http_status=exc.http_status, retry_s=backoff)
-                    self._stop.wait(backoff)
-                    backoff = min(backoff * 2, 30)
+                                    http_status=exc.http_status, retry_s=delay)
+                    self._stop.wait(delay)
+                    backoff = min(max(backoff * 2, delay), 30)
                     continue
                 except OSError:
                     self.events.log("poll_failed", kind="transport", stage="get_updates",
@@ -664,6 +849,8 @@ class TelegramAgyBot:
                             raise
                 self._poll_questions()
         finally:
+            with self._lock:
+                self._running = False
             self.events.log("bot_stopped", stage="shutdown")
             with self._lock:
                 task, worker = self._active, self._worker

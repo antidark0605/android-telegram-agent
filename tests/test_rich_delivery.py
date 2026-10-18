@@ -95,6 +95,19 @@ class RichTests(unittest.TestCase):
                 self.send.send(1, 2, "**danger**")
         self.assertEqual(calls, ["sendRichMessage"])
 
+    def test_fallback_escapes_long_text_without_exceeding_utf16_limit(self):
+        calls = []
+        def reject(method, payload, timeout=20):
+            calls.append(payload)
+            if method == "sendRichMessage":
+                raise TelegramError("rejected", kind="http", http_status=400)
+            self.assertLessEqual(len(payload["text"].encode("utf-16-le")) // 2, 4096)
+            self.assertEqual(payload["parse_mode"], "HTML")
+            return {"message_id": len(calls)}
+        with patch.object(self.api, "_call", side_effect=reject):
+            self.assertEqual(self.send.send(1, 2, "&" * 7000), 2)
+        self.assertGreater(len(calls), 2)
+
     def test_chunk_size_and_unicode(self):
         answer = "中文加粗**strong**\n" * 5000
         chunks = rich_chunks(answer)

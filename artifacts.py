@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import mimetypes
 import os
 import re
 import stat
@@ -12,6 +13,11 @@ from pathlib import Path
 MAX_ARTIFACTS = 4
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_TOTAL_BYTES = 40 * 1024 * 1024
+MEDIA_SUFFIXES = {
+    "photo": frozenset({".jpg", ".jpeg", ".png", ".webp"}),
+    "audio": frozenset({".mp3", ".m4a"}),
+    "video": frozenset({".mp4"}),
+}
 _MARKER = re.compile(r"^[ \t]*TAGW_MEDIA:[ \t]*(\{.*\})[ \t]*$")
 _FENCE = re.compile(r"^[ ]{0,3}(\x60{3,}|~{3,})")
 
@@ -69,6 +75,10 @@ def _kind(name: str, requested: str, size: int) -> str:
         return "document"
     if requested == "photo" and size > 10_000_000:
         return "document"
+    if requested in MEDIA_SUFFIXES and Path(name).suffix.lower() not in MEDIA_SUFFIXES[requested]:
+        raise ValueError("Artifact extension does not match its media kind")
+    if requested in MEDIA_SUFFIXES and mimetypes.guess_type(name)[0] is None:
+        raise ValueError("Artifact MIME type is unavailable")
     return requested
 
 
