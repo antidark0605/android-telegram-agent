@@ -16,26 +16,55 @@ from pathlib import Path
 from typing import Iterable
 
 from artifacts import Artifact
-from telegram_api import TelegramError, split_text
+from telegram_api import (TelegramError, _check_formatted,
+                          _retry_after_from_bytes, split_text)
+from vendor.telegram_ui import utf16_length
 
-MAX_RICH_CHARS = 11000  # below 32768 characters, leaving room for media links
+MAX_RICH_UNITS = 11000  # conservative UTF-16 budget for rich_message.markdown
 API_FALLBACK_STATUSES = {400, 404}  # definitely rejected, not an ambiguous timeout
 
 
+def _safe_fallback_parts(markdown: str) -> list[str]:
+    """Convert Markdown to HTML chunks that fit sendMessage's UTF-16 limit."""
+    output: list[str] = []
+    for part in split_text(markdown or "(empty response)", limit=2400):
+        remaining = part
+        while remaining:
+            formatted = _html_fallback(remaining)
+            if utf16_length(formatted) <= 4096:
+                output.append(formatted)
+                break
+            low, high, best = 1, len(remaining), 0
+            while low <= high:
+                middle = (low + high) // 2
+                candidate = _html_fallback(remaining[:middle])
+                if utf16_length(candidate) <= 4096:
+                    best = middle
+                    low = middle + 1
+                else:
+                    high = middle - 1
+            if best == 0:
+                raise TelegramError("Formatted fallback could not be bounded", kind="protocol")
+            output.append(_check_formatted(_html_fallback(remaining[:best])))
+            remaining = remaining[best:]
+    return output or ["(empty response)"]
+
+
 def rich_chunks(text: str) -> list[str]:
-    """Prefer paragraph boundaries without splitting Unicode code points."""
+    """Prefer paragraph boundaries without exceeding the UTF-16 budget."""
     if not text:
         return [""]
     pieces: list[str] = []
     current = ""
     for line in text.splitlines(keepends=True):
-        while len(line) > MAX_RICH_CHARS:
+        while utf16_length(line) > MAX_RICH_UNITS:
+            cut = split_text(line, limit=MAX_RICH_UNITS)[0]
             if current:
                 pieces.append(current)
                 current = ""
-            pieces.append(line[:MAX_RICH_CHARS])
-            line = line[MAX_RICH_CHARS:]
-        if len(current) + len(line) > MAX_RICH_CHARS and current:
+            pieces.append(cut)
+            line = line[len(cut):]
+        if utf16_length(current) + utf16_length(line) > MAX_RICH_UNITS and current:
             pieces.append(current)
             current = ""
         current += line
@@ -162,8 +191,9 @@ class RichDelivery:
             with urllib.request.urlopen(req, timeout=90) as res:
                 raw = res.read(10_000_001)
         except urllib.error.HTTPError as exc:
+            retry_after = _retry_after_from_bytes(exc.read(100_000))
             raise TelegramError("Telegram HTTP failure", kind="http",
-                                http_status=exc.code) from None
+                                http_status=exc.code, retry_after=retry_after) from None
         except (OSError, urllib.error.URLError, TimeoutError, socket.timeout):
             raise TelegramError("Telegram upload unavailable", kind="transport") from None
         if len(raw) > 10_000_000:
@@ -208,8 +238,8 @@ class RichDelivery:
 
     def _text_fallback(self, chat: int, thread: int | None, markdown: str) -> int | None:
         first = None
-        for part in split_text(markdown or "(empty response)", limit=3000):
-            payload = {"chat_id": chat, "text": _html_fallback(part),
+        for formatted in _safe_fallback_parts(markdown):
+            payload = {"chat_id": chat, "text": formatted,
                        "parse_mode": "HTML"}
             if thread is not None:
                 payload["message_thread_id"] = thread
@@ -217,6 +247,23 @@ class RichDelivery:
             message_id = _confirmed_message_id(result)
             if first is None:
                 first = message_id
+        return first
+
+    def send_classic(self, chat: int, thread: int | None, text: str,
+                     artifacts: list[Artifact] | None = None) -> int | None:
+        """Send plain text chunks, then declared media through classic APIs."""
+        first = None
+        for part in split_text(text or "(empty response)", limit=3800):
+            payload = {"chat_id": chat, "text": part,
+                       "link_preview_options": {"is_disabled": True}}
+            if thread is not None:
+                payload["message_thread_id"] = thread
+            result = self.api._call("sendMessage", payload, timeout=20)
+            message_id = _confirmed_message_id(result)
+            if first is None:
+                first = message_id
+        if artifacts:
+            self._standard_media(chat, thread, artifacts)
         return first
 
     def _standard_media(self, chat: int, thread: int | None,

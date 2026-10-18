@@ -99,7 +99,7 @@ python -c 'from config import load_settings; from pathlib import Path; load_sett
 python bot.py --config "$HOME/.config/android-telegram-agent/config.json"
 ```
 
-`CONFIG_OK` 才表示設定檢查通過；範本假值會被拒絕。Bot 保持前景，先傳 `/start`、`/status`，在目標聊天／Topic 傳 `/session start`、用 `/model` 選定模型，再傳新純文字。必須在相同聊天／話題收到真實模型答案，才記往返 PASS；首次启动會捨棄舊排隊訊息。完成本次測試後按 Ctrl+C 停止本次 Bot。来源：[`bot.py`](../bot.py)。
+`CONFIG_OK` 才表示設定檢查通過；範本假值會被拒絕。Bot 保持前景，先傳 `/start`、`/status`，在目標聊天／Topic 傳 `/session start`、用 `/model` 選定模型，再用 `/display` 選擇每個 Topic 的 rich/classic/raw 模式，最後傳新純文字或一個照片／文件附件。`/last` 僅是目前 Topic 的手動重送；不會把模糊網路失敗自動重播成 exactly-once。必須在相同聊天／話題收到真實模型答案，才記往返 PASS；首次启动會捨棄舊排隊訊息。完成本次測試後按 Ctrl+C 停止本次 Bot。來源：[`bot.py`](../bot.py)、[`incoming_media.py`](../incoming_media.py)、[`last_store.py`](../last_store.py)。
 
 ## 驗證界線
 

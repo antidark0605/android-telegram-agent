@@ -17,10 +17,11 @@ class TelegramError(RuntimeError):
     """Only safe categorical metadata; never include URL, token or response body."""
 
     def __init__(self, message: str, *, kind: str = "unknown",
-                 http_status: int | None = None):
+                 http_status: int | None = None, retry_after: int | None = None):
         super().__init__(message)
         self.kind = kind
         self.http_status = http_status
+        self.retry_after = retry_after
 
 
 class TelegramAPI:
@@ -40,7 +41,9 @@ class TelegramAPI:
             with urllib.request.urlopen(req, timeout=timeout) as res:
                 raw = res.read(10_000_001)
         except urllib.error.HTTPError as exc:
-            raise TelegramError("Telegram HTTP failure", kind="http", http_status=exc.code) from None
+            retry_after = _retry_after_from_bytes(exc.read(100_000))
+            raise TelegramError("Telegram HTTP failure", kind="http", http_status=exc.code,
+                                retry_after=retry_after) from None
         except (urllib.error.URLError, TimeoutError, socket.timeout, OSError):
             raise TelegramError("Telegram connection unavailable", kind="transport") from None
         if len(raw) > 10_000_000:
@@ -51,8 +54,10 @@ class TelegramAPI:
             raise TelegramError("Invalid Telegram API response", kind="protocol") from None
         if not isinstance(obj, dict) or not obj.get("ok"):
             code = obj.get("error_code") if isinstance(obj, dict) else None
+            retry_after = _retry_after_from_object(obj)
             raise TelegramError("Telegram API rejected request", kind="api",
-                                http_status=code if type(code) is int else None)
+                                http_status=code if type(code) is int else None,
+                                retry_after=retry_after)
         return obj.get("result")
 
     def get_updates(self, offset: int, timeout: int = 20) -> list[dict]:
@@ -90,6 +95,19 @@ class TelegramAPI:
                 mid = result.get("message_id")
                 first_id = mid if isinstance(mid, int) else None
         return first_id
+
+    def send_classic(self, chat_id: int, text: str, thread_id: int | None = None,
+                     artifacts=None) -> int | None:
+        """Send unparsed UTF-16-safe text, optionally followed by media.
+
+        The artifact argument is intentionally handled by RichDelivery so the
+        same bounded multipart implementation is used for classic and rich
+        modes.  No Markdown is passed to Telegram with a missing parse mode.
+        """
+        if artifacts:
+            from rich_delivery import RichDelivery
+            return RichDelivery(self).send_classic(chat_id, thread_id, text, artifacts)
+        return self.send_text(chat_id, text, thread_id)
 
     def send_rich(self, chat_id: int, markdown: str, thread_id: int | None = None,
                   artifacts=None) -> int | None:
@@ -130,3 +148,21 @@ def split_text(text: str, limit: int = 3800) -> list[str]:
     if not text:
         return ["(empty response)"]
     return ui_split_text(text, limit)
+
+
+def _retry_after_from_object(value: object) -> int | None:
+    if not isinstance(value, dict):
+        return None
+    params = value.get("parameters")
+    if not isinstance(params, dict):
+        return None
+    delay = params.get("retry_after")
+    return delay if type(delay) is int and 0 <= delay <= 3600 else None
+
+
+def _retry_after_from_bytes(raw: bytes) -> int | None:
+    try:
+        import json
+        return _retry_after_from_object(json.loads(raw))
+    except (ValueError, TypeError, UnicodeDecodeError):
+        return None

@@ -1,6 +1,6 @@
 # Android v0.2: Telegram Rich Output and Artifact Acceptance
 
-Revision: 2 — 2026-10-14
+Revision: 3 — 2026-10-18
 
 This is a **candidate**, not a deployment log. Use synthetic file names and
 data. No real device model, hardware serial, company name, chat ID, Bot token,
@@ -38,6 +38,10 @@ raw Termux logs belong in this public document.
 | R14 | Idle and active memory during multipart upload | Bounded memory and clean temporary resources |
 | R15 | Existing /session, /model, /status, /myid, Stop and Ask | No regressions; exactly one task at a time |
 | R16 | Public PR SHA and patch, workflow logs, filename/constants scan | No company/private/hardware/device, user identifiers or credentials |
+| R17 | `/display` rich/classic/raw selected in two Topics | Mode is stored and applied only to the selected Topic; callback owner/chat/topic/message is checked |
+| R18 | Inbound document/photo with unsafe name, MIME, size, path and cancellation | Authorized task only; bounded private temp file; invalid input is rejected and cleaned |
+| R19 | `/last` after a successful, failed and ambiguous send | Manual current-Topic resend is bounded/TTL-limited; no automatic exactly-once claim |
+| R20 | Service start notice repeated messages and unknown restart reason | One notice per authorized used destination per process instance; reason is explicitly unknown and model is not claimed loaded |
 
 ## Important behavior
 
@@ -53,8 +57,8 @@ raw Termux logs belong in this public document.
   spanning a chunk boundary is a known formatting limitation for follow-up.
 - Telegram reports sending success, but only a real user can confirm display
   or download on a client.
-- This version does not scan directory modifications or implement a durable
-  outgoing media queue; these belong in follow-up work, if needed.
+- `/last` is a bounded manual resend record, not a durable outgoing media queue;
+  ambiguous sends are never automatically replayed.
 
 ## Reporting
 

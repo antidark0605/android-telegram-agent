@@ -17,9 +17,12 @@ def update(text, user=101, chat=202, topic=None, chat_type="private", is_bot=Fal
     return {"update_id": 9, "message": msg}
 
 
-def callback(data, mid, user=101, chat=202):
+def callback(data, mid, user=101, chat=202, topic=None):
+    message = {"message_id": mid, "chat": {"id": chat}}
+    if topic is not None:
+        message["message_thread_id"] = topic
     return {"callback_query": {"id": "query", "from": {"id": user},
-                               "message": {"message_id": mid, "chat": {"id": chat}},
+                               "message": message,
                                "data": data}}
 
 
@@ -71,6 +74,17 @@ class BotTests(unittest.TestCase):
             item["message"]["caption"] = caption
         return item
 
+    def document_update(self, caption=None, user=101):
+        item = update("", user=user)
+        item["message"].pop("text")
+        item["message"]["document"] = {
+            "file_id": "doc_synthetic", "file_name": "notes.txt",
+            "mime_type": "text/plain", "file_size": 12,
+        }
+        if caption is not None:
+            item["message"]["caption"] = caption
+        return item
+
     def test_photo_caption_and_default_routed_as_tasks(self):
         with patch.object(self.bot, "_start_task") as start:
             self.bot.handle_update(self.photo_update("/describe this"))
@@ -84,6 +98,13 @@ class BotTests(unittest.TestCase):
             self.bot.handle_update(self.photo_update(user=999))
             download.assert_not_called()
             runner.assert_not_called()
+
+    def test_authorized_document_routes_to_one_task_without_model_path(self):
+        with patch.object(self.bot, "_start_task") as start:
+            self.bot.handle_update(self.document_update("summarize this"))
+        self.assertEqual(start.call_args.args[0], "summarize this")
+        self.assertEqual(start.call_args.kwargs["photo"]["kind"], "document")
+        self.assertEqual(start.call_args.kwargs["photo"]["file_name"], "notes.txt")
 
     def test_photo_download_prompt_and_cleanup(self):
         from sessions import scope
@@ -193,6 +214,17 @@ class BotTests(unittest.TestCase):
         self.assertIn("YOLO: enabled", self.api.sent[1][1])
         self.assertIn("Unknown command", self.api.sent[2][1])
 
+    def test_display_and_last_are_scoped_to_current_topic(self):
+        from sessions import scope
+        key = scope(101, 202, None)
+        self.bot.handle_update(update("/display classic"))
+        self.assertEqual(self.bot.sessions.get(key)["display_mode"], "classic")
+        self.bot._save_last(key, "⚡ [AGY] · gemini-test\n\nanswer", "classic")
+        before = len(self.api.sent)
+        self.bot.handle_update(update("/last"))
+        self.assertEqual(self.api.sent[-1][1], "⚡ [AGY] · gemini-test\n\nanswer")
+        self.assertEqual(len(self.api.sent), before + 1)
+
     def test_topic_model_scoping_and_restart(self):
         with patch("bot.list_models", return_value=[
             ("gemini-3.8-flash-high", "Gemini Flash"),
@@ -203,7 +235,7 @@ class BotTests(unittest.TestCase):
             self.assertEqual([len(row) for row in keyboard], [2])
             self.assertEqual(keyboard[0][1]["callback_data"], "model:1")
             mid = len(self.api.sent)
-            self.bot.handle_update(callback("model:1", mid))
+            self.bot.handle_update(callback("model:1", mid, topic=2))
         from sessions import scope
         key_a = scope(101, 202, 2)
         key_b = scope(101, 202, 3)
@@ -213,7 +245,7 @@ class BotTests(unittest.TestCase):
         self.assertEqual(self.bot.sessions.get(key_a)["model"], "claude-sonnet-5-5-medium")
         self.assertEqual(self.bot.sessions.__class__(self.bot.sessions.path).get(key_a)["model"],
                          "claude-sonnet-5-5-medium")
-        self.bot.handle_update(callback("model:1", mid))
+        self.bot.handle_update(callback("model:1", mid, topic=2))
         self.assertEqual(self.bot.sessions.get(key_a)["model"], "claude-sonnet-5-5-medium")
 
     def test_new_clears_only_current_session(self):
