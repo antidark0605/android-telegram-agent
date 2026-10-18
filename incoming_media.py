@@ -70,7 +70,8 @@ def select_document(value: object) -> dict | None:
     if not isinstance(mime, str) or mime.lower() not in DOCUMENT_MIME:
         return None
     mime = mime.lower()
-    if not _positive_size(value.get("file_size")):
+    declared_size = value.get("file_size")
+    if declared_size is not None and not _positive_size(declared_size):
         return None
     try:
         filename = _safe_filename(value.get("file_name"), mime)
@@ -78,7 +79,7 @@ def select_document(value: object) -> dict | None:
         return None
     return {"kind": "document", "file_id": value["file_id"],
             "file_name": filename, "mime_type": mime,
-            "file_size": value["file_size"]}
+            "file_size": declared_size}
 
 
 def select_photo(value: object) -> dict | None:

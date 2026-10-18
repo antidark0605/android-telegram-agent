@@ -30,6 +30,7 @@ class IncomingDocumentTests(unittest.TestCase):
 
     def test_document_requires_allowlisted_mime_and_safe_name(self):
         self.assertEqual(select_document(self.document)["kind"], "document")
+        self.assertIsNone(select_document({**self.document, "file_size": None})["file_size"])
         self.assertIsNone(select_document({**self.document, "mime_type": "application/x-secret"}))
         self.assertIsNone(select_document({**self.document, "file_name": "../report.pdf"}))
         self.assertIsNone(select_document({**self.document, "file_name": "report.txt"}))
