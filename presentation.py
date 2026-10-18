@@ -1,6 +1,6 @@
 """Map Bot state onto the vendored telegram-agent-ui presentation library.
 
-Revision: 1 — 2026-10-17. Pure mapping only: quota collection, task control
+Revision: 2 — 2026-10-18. Pure mapping only: quota collection, task control
 and Telegram transport stay in their existing modules.
 """
 from __future__ import annotations
@@ -18,7 +18,7 @@ from vendor.telegram_ui import (
 AGENT = "AGY"
 DISPLAY_MODES = ("rich", "classic", "raw")
 DISPLAY_LABELS = {"rich": "Rich（結構化）", "classic": "Classic（純文字）",
-                  "raw": "Raw（原始回答）"}
+                  "raw": "Raw（無格式正文）"}
 # Quota rows keep the established one-decimal format without a UTC offset.
 PROFILE = DisplayProfile(fields=("model",), quota_precision=1,
                          show_reset_offset=False)

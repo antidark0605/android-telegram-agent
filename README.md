@@ -1,6 +1,6 @@
 # android-telegram-agent
 
-Revision: 5 — 2026-10-17
+Revision: 6 — 2026-10-18
 
 Small non-root **Termux + Telegram + official AGY CLI** Bot for Android. Original Python standard-library code, not a port of another private codebase. No root, inbound ports, OpenClaw, collaboration, kanban, server framework, or pip dependencies.
 
@@ -13,10 +13,10 @@ Small non-root **Termux + Telegram + official AGY CLI** Bot for Android. Origina
 | Text | Require an activated session and explicit model, then run AGY and resume the prior conversation |
 | /start, /help | Show available commands |
 | /myid | Show the **current** Telegram user, chat type/ID and Topic ID, subject to the authorization policy |
-| /new | Reset this Topic's AGY conversation (keeps its model selection) |
+| /new | Reset this Topic's AGY conversation (keeps its model and display selections) |
 | /status | Show running/idle, CWD, native AGY conversation ID, selected model/variant and last reported model, YOLO setting |
 | /model | Pick a model/variant from `agy models`; **per Topic** |
-| /display | Pick `rich`, `classic` or `raw` reply transport; **per Topic** |
+| /display | Pick `rich`, `classic` or `raw` (unformatted body) reply transport; **per Topic** |
 | /last | Manually resend the bounded, private last reply for this Topic |
 | /session start | Activate the current chat/Topic without submitting a prompt; keep the configured workspace |
 | /ls | List the configured workspace using `ls -l`, without arbitrary arguments |
@@ -26,7 +26,9 @@ Small non-root **Termux + Telegram + official AGY CLI** Bot for Android. Origina
 
 Each task sends one formatted progress status message (state and elapsed seconds) with 🛑 中斷 (Stop), edited in place around every five seconds, and a separate final answer. Stop is tied to the authorized user, chat, exact status-message ID and unique task key. While the answer is being delivered the status shows *Delivering* without Stop; it shows completed only after Telegram acknowledges the answer, otherwise *Delivery unconfirmed*. Once finished, the button is removed. `/status` remains a plain-text summary. One AGY process at a time prevents memory spikes on small devices.
 
-**Topics:** A fresh chat/Topic requires `/session start` before ordinary text can run AGY. This activates the current scope; it does not create a Telegram Topic. A pre-existing saved AGY conversation remains activated. The private chat (no Topic) has its own separate Session. Each Telegram `message_thread_id` has a separate AGY conversation ID, Model selection and last task token accounting. A new Topic does not require creating another Bot Token. `/new` resets only the current Topic. Restarting the Bot preserves its Session mappings in a private JSON file. Invalid/corrupted state stops startup rather than silently erasing conversations; a failed persistence operation never updates the in-memory mapping.
+**Topics:** A fresh chat/Topic requires `/session start` before ordinary text can run AGY. This activates the current scope; it does not create a Telegram Topic. A pre-existing saved AGY conversation remains activated. The private chat (no Topic) has its own separate Session. Each Telegram `message_thread_id` has a separate AGY conversation ID, Model selection and last task token accounting. A new Topic does not require creating another Bot Token. `/new` resets only the current Topic while preserving its model and display mode. Restarting the Bot preserves its Session mappings in a private JSON file. Invalid/corrupted state stops startup rather than silently erasing conversations; a failed persistence operation never updates the in-memory mapping.
+
+After polling state and the update offset are ready, the Bot sends one lifecycle notice per previously used, currently authorized user/chat pair, routed to that pair's most recently used Topic. The first persisted ready instance reports `ready`; later instances report `restarted`. The cause remains unknown without host evidence and the notice never claims a model is loaded. A send is attempted at most once per pair in one process; an unconfirmed attempt is not replayed in that process and may be tried again on the next start. Destinations are learned only from authorized inbound use, not by broadcasting to every allowlist entry.
 
 **Model identification:** `/status` displays the configured or selected model, not a guessed effective model. Models selected through Telegram are passed as AGY's `--model` argument to the *next* run; an active task cannot change its model. If a validated AGY JSON result explicitly provides an `actual_model` field, the Bot saves it separately; without one it displays **not reported**. The former AGY default option only omitted `--model`; it did not identify a particular model. It has been removed, together with `/models` and `/model default`. Choose an explicit model before submitting tasks. Effort is part of the AGY model variant (for example High/Medium/Low), not a separate Bot setting. A native session ID remains pending until AGY returns a validated conversation ID. `/ls` only lists the configured workspace, excludes hidden entries just like `ls -l`, rejects arguments, has a five-second deadline and truncates long output. Listing errors do not expose stderr.
 
@@ -55,7 +57,7 @@ TAGW_MEDIA: {"path":"artifacts/report.pdf","kind":"auto"}
 
 Never include secrets in artifacts. Telegram group members may see results even if the Bot only executes commands from whitelisted senders. Private credentials, workspaces, personal files, OAuth state, raw logs and physical test-device information must not be committed into the public repository.
 
-Inbound photos and documents are accepted only after the same exact user/chat/topic authorization and session/model gates as text. Photos are limited to 20 MiB at the Bot API download boundary and PNG/JPEG/WebP signatures; documents require an allowlisted MIME type, a safe filename and the same 20 MiB bound. Temporary files are owner-only under `incoming-media/` (the legacy photo wrapper uses `incoming-images/`) and are removed after the task. The bot never accepts a model-supplied destination chat or filesystem path.
+Inbound photos and documents are accepted only after the same exact user/chat/topic authorization and session/model gates as text. Photos are limited to 20 MiB at the Bot API download boundary and PNG/JPEG/WebP signatures; documents require an allowlisted MIME type, a matching safe filename suffix and the same 20 MiB bound. Markdown accepts `.md` with `text/markdown` or Telegram's common `text/plain` classification. Authorized users receive a generic rejection for unsupported attachments; unauthorized senders remain silent. Temporary files are owner-only under `incoming-media/` (the legacy photo wrapper uses `incoming-images/`) and are removed after the task. The bot never accepts a model-supplied destination chat or filesystem path.
 
 **Important:** GitHub mock CI verifies request structure, safety and fallbacks. Actual **Telegram 10.3 rich media delivery**, client rendering, album behavior, and local CLI artifact generation must be confirmed by Local Agent on the device before production deployment.
 
@@ -134,7 +136,7 @@ python bot.py --config "$HOME/.config/android-telegram-agent/config.json"
 
 **YOLO warning:** `yolo: true` adds `--dangerously-skip-permissions` to AGY invocation, allowing AGY to auto-approve tool operations accessible to its Android UID. This greatly expands what remotely submitted prompts can do. Public sample is deliberately `false`. Enable it **only in a trusted, private deployment under explicit owner approval**, restrict Bot access with the user/chat allowlist, and use a dedicated workspace. A working directory is **not a filesystem security boundary**. The Bot does not change global AGY permission settings.
 
-Private files beside `config.json`: `telegram-offset.json`, `sessions.json`, bounded `last.json`, and `ask-bridge/` question/answer files. File writes use atomic replacement and mode 0600; related directories should remain mode 0700. The only local AGY configuration change is a scoped workspace MCP server declaration. Token, conversations, original prompts, OAuth material, personal device identifiers and logs must never enter public GitHub, Actions artifacts or PR comments.
+Private files beside `config.json`: `telegram-offset.json`, `sessions.json`, bounded `last.json`, `lifecycle.json`, and `ask-bridge/` question/answer files. The lifecycle file contains only authorized-used routing integers, recency ordering and readiness evidence; it contains no token, host, PID, path or message content. File writes use atomic replacement and mode 0600; related directories should remain mode 0700. The only local AGY configuration change is a scoped workspace MCP server declaration. Token, conversations, original prompts, OAuth material, personal device identifiers and logs must never enter public GitHub, Actions artifacts or PR comments.
 
 ## Private operational diagnostics
 
@@ -234,6 +236,9 @@ is needed. `presentation.py` maps Bot state onto it:
   extracted, then the `render_usage` footer. Quota numbers and reset times come
   only from the existing `/usage` parser and 60-second cache; no extra call is
   made. Context stays unavailable: task token totals are not occupancy.
+- Raw mode means the answer body receives no presentation formatting. Standalone
+  `TAGW_MEDIA` lines remain delivery metadata: they are extracted through the
+  same safe artifact path and are not displayed as body text.
 - Progress uses `render_progress` without a flow line (AGY reports no stage
   events) for running, waiting, completed, cancelled and failed. *Delivering*
   is shown as running with a delivery activity line and no Stop button;
@@ -252,7 +257,7 @@ Device rendering of the new status and header formats has not been verified.
 
 ## Incoming photos and documents
 
-Revision 6 — 2026-10-18. Send a Telegram photo or allowlisted document with an optional caption after
+Revision 7 — 2026-10-18. Send a Telegram photo or allowlisted document with an optional caption after
 activating the chat/topic and selecting a model. Without a caption, the agent
 is asked to describe the photo. The largest available photo variant is fetched
 using Telegram `getFile`, saved inside the workspace with owner-only access,
@@ -262,7 +267,8 @@ can leave private files for manual cleanup; `incoming-images/` is Git-ignored.
 Stop is checked between download reads; an in-progress network read can wait
 up to its 30-second socket timeout. Downloads are limited to 20 MiB; photos
 must carry PNG/JPEG/WebP signatures and documents must carry an allowlisted MIME
-type and safe filename. The temporary file is removed after the task.
+type and matching safe filename suffix. Markdown documents accept `.md` with
+`text/markdown` or `text/plain`. The temporary file is removed after the task.
 Unlisted senders and busy or unactivated sessions cannot initiate downloads.
 Albums and multi-file messages are not implemented. Send one attachment per
 task. Earlier ignored attachments are not replayed. A compatible AGY version

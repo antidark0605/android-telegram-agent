@@ -43,6 +43,14 @@ class FakeAPI:
         self.rich_sent.append((chat, markdown, thread, artifacts))
         return len(self.sent)
 
+    def send_classic(self, chat, text, thread=None, artifacts=None):
+        self.sent.append((chat, text, thread, None, None))
+        self.log.append(("classic", text))
+        if not hasattr(self, "classic_sent"):
+            self.classic_sent = []
+        self.classic_sent.append((chat, text, thread, artifacts))
+        return len(self.sent)
+
     def edit_text(self, chat, mid, text, reply_markup=None, parse_mode=None):
         self.edits.append((chat, mid, text, reply_markup, parse_mode))
         self.log.append(("edit", text))
@@ -105,6 +113,42 @@ class BotTests(unittest.TestCase):
         self.assertEqual(start.call_args.args[0], "summarize this")
         self.assertEqual(start.call_args.kwargs["photo"]["kind"], "document")
         self.assertEqual(start.call_args.kwargs["photo"]["file_name"], "notes.txt")
+
+    def test_invalid_attachment_is_generic_for_authorized_and_silent_for_unknown(self):
+        invalid = self.document_update()
+        invalid["message"]["document"]["mime_type"] = "application/x-private"
+        with patch.object(self.bot, "_start_task") as start:
+            self.bot.handle_update(invalid)
+            start.assert_not_called()
+        self.assertIn("Unsupported attachment", self.api.sent[-1][1])
+        self.assertNotIn("application/", self.api.sent[-1][1])
+        count = len(self.api.sent)
+        invalid_unknown = self.document_update(user=999)
+        invalid_unknown["message"]["document"]["file_name"] = "../private.md"
+        self.bot.handle_update(invalid_unknown)
+        self.assertEqual(len(self.api.sent), count)
+
+        unsupported = update("", topic=4)
+        unsupported["message"].pop("text")
+        unsupported["message"]["video"] = {"file_id": "synthetic-video"}
+        self.bot.handle_update(unsupported)
+        self.assertIn("Unsupported attachment", self.api.sent[-1][1])
+        self.assertEqual(self.api.sent[-1][2], 4)
+
+        invalid_photo = self.photo_update()
+        invalid_photo["message"]["photo"] = []
+        self.bot.handle_update(invalid_photo)
+        self.assertIn("Unsupported attachment", self.api.sent[-1][1])
+
+    def test_unknown_slash_caption_routes_photo_and_document_consistently(self):
+        with patch.object(self.bot, "_start_task") as start:
+            self.bot.handle_update(self.photo_update("/not-a-command"))
+            self.bot.handle_update(self.document_update("/not-a-command"))
+        self.assertEqual(start.call_count, 2)
+        self.assertEqual([call.args[0] for call in start.call_args_list],
+                         ["/not-a-command", "/not-a-command"])
+        self.assertEqual([call.kwargs["photo"]["kind"] for call in start.call_args_list],
+                         ["photo", "document"])
 
     def test_photo_download_prompt_and_cleanup(self):
         from sessions import scope
@@ -214,6 +258,14 @@ class BotTests(unittest.TestCase):
         self.assertIn("YOLO: enabled", self.api.sent[1][1])
         self.assertIn("Unknown command", self.api.sent[2][1])
 
+    def test_authorized_use_records_destination_without_lifecycle_notice(self):
+        self.bot.handle_update(update("/status", topic=23))
+        self.assertEqual(len(self.api.sent), 1)
+        stored = __import__("json").loads(
+            self.bot.lifecycle.path.read_text(encoding="utf8"))
+        self.assertFalse(stored["ready_seen"])
+        self.assertEqual(stored["destinations"][0]["thread_id"], 23)
+
     def test_display_and_last_are_scoped_to_current_topic(self):
         from sessions import scope
         key = scope(101, 202, None)
@@ -224,6 +276,17 @@ class BotTests(unittest.TestCase):
         self.bot.handle_update(update("/last"))
         self.assertEqual(self.api.sent[-1][1], "⚡ [AGY] · gemini-test\n\nanswer")
         self.assertEqual(len(self.api.sent), before + 1)
+
+    def test_raw_body_still_extracts_safe_artifact_marker(self):
+        folder = self.bot.settings.workspace / "artifacts"
+        folder.mkdir(exist_ok=True)
+        (folder / "raw.txt").write_text("synthetic", encoding="utf8")
+        text = ('unformatted body\n'
+                'TAGW_MEDIA: {"path":"artifacts/raw.txt","kind":"document"}')
+        self.assertTrue(self.bot._send_output(202, text, 7, "raw"))
+        _, delivered, thread, artifacts = self.api.classic_sent[-1]
+        self.assertEqual((delivered, thread), ("unformatted body", 7))
+        self.assertEqual([item.filename for item in artifacts], ["raw.txt"])
 
     def test_topic_model_scoping_and_restart(self):
         with patch("bot.list_models", return_value=[
@@ -251,12 +314,13 @@ class BotTests(unittest.TestCase):
     def test_new_clears_only_current_session(self):
         from sessions import scope
         a, b = scope(101, 202, None), scope(101, 202, 12)
-        self.bot.sessions.change(a, model="gemini-3.8-flash-high",
+        self.bot.sessions.change(a, model="gemini-3.8-flash-high", display_mode="raw",
                                  conversation_id="conv-123456789")
         self.bot.sessions.change(b, conversation_id="conv-999999999")
         self.bot.handle_update(update("/new"))
         self.assertNotIn("conversation_id", self.bot.sessions.get(a))
         self.assertEqual(self.bot.sessions.get(a)["model"], "gemini-3.8-flash-high")
+        self.assertEqual(self.bot.sessions.get(a)["display_mode"], "raw")
         self.assertEqual(self.bot.sessions.get(b)["conversation_id"], "conv-999999999")
 
     def test_ask_pending_free_text(self):

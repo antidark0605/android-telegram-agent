@@ -19,6 +19,7 @@ from ask_bridge import AskBridge
 from config import ConfigError, Settings, load_settings
 from diagnostics import EventLogger
 from last_store import LastStore
+from lifecycle_store import LifecycleStore
 from sessions import SessionStore, scope, write_private
 from telegram_api import TelegramAPI, TelegramError
 from presentation import (DISPLAY_LABELS, DISPLAY_MODES, display_keyboard,
@@ -28,6 +29,11 @@ from usage_footer import QuotaService
 from vendor.telegram_ui.service_lifecycle import (ServiceLifecycleView,
                                                    render_service_lifecycle)
 from rich_delivery import _html_fallback
+
+ATTACHMENT_FIELDS = frozenset({
+    "photo", "document", "audio", "video", "animation", "voice",
+    "video_note", "sticker",
+})
 
 
 @dataclass
@@ -97,6 +103,7 @@ class TelegramAgyBot:
         self.sessions = SessionStore(settings.config_path.parent / "sessions.json")
         self.bridge = AskBridge(settings.config_path.parent / "ask-bridge")
         self.last = LastStore(settings.config_path.parent / "last.json")
+        self.lifecycle = LifecycleStore(settings.config_path.parent / "lifecycle.json")
         self._lock = threading.RLock()
         self._active: Task | None = None
         self._worker: threading.Thread | None = None
@@ -106,8 +113,7 @@ class TelegramAgyBot:
         self._stop = threading.Event()
         self._running = False
         self._started_at = datetime.now(timezone.utc)
-        self._lifecycle_destinations: set[tuple[int, int, int | None]] = set()
-        self._lifecycle_inflight: set[tuple[int, int, int | None]] = set()
+        self._lifecycle_attempted: set[tuple[int, int]] = set()
         self.quota = QuotaService(settings.agy_command, settings.workspace)
 
     def _send(self, chat: int, text: str, thread: int | None = None,
@@ -152,27 +158,46 @@ class TelegramAgyBot:
             self.events.log("send_failed", stage="send_message", kind="storage")
             return False
 
-    def _remember_destination(self, user: int, chat: int, thread: int | None) -> None:
-        """Send one service-instance notice only after an authorized use."""
-        destination = (user, chat, thread)
-        with self._lock:
-            if (not self._running or destination in self._lifecycle_destinations
-                    or destination in self._lifecycle_inflight):
-                return
-            self._lifecycle_inflight.add(destination)
-        sent = None
+    def _record_destination(self, user: int, chat: int, thread: int | None) -> None:
+        """Persist the latest Topic for one already-authorized user/chat pair."""
+        try:
+            self.lifecycle.remember(user, chat, thread)
+        except (OSError, ValueError, TypeError):
+            self.events.log("lifecycle_failed", kind="storage", stage="destination_save")
+
+    def _notify_lifecycle(self) -> None:
+        """Notify prior used destinations once after polling state is ready."""
+        try:
+            state, targets = self.lifecycle.begin_instance()
+        except (OSError, ValueError, TypeError):
+            self.events.log("lifecycle_failed", kind="storage", stage="startup_state")
+            return
         try:
             notice = render_service_lifecycle(ServiceLifecycleView(
-                agent_label="AGY", state="restarted",
+                agent_label="AGY", state=state,
                 started_at=self._started_at, reason=None))
-            sent = self._send(chat, _html_fallback(notice), thread, parse_mode="HTML")
+            rendered = _html_fallback(notice)
         except (TypeError, ValueError):
             self.events.log("lifecycle_failed", kind="protocol", stage="startup_notice")
-        finally:
+            return
+        for user, chat, thread in targets:
+            pair = (user, chat)
+            # Mark before sending: a lost acknowledgement must not cause an
+            # automatic duplicate within this process instance.
             with self._lock:
-                self._lifecycle_inflight.discard(destination)
-                if sent is not None:
-                    self._lifecycle_destinations.add(destination)
+                if pair in self._lifecycle_attempted:
+                    continue
+                self._lifecycle_attempted.add(pair)
+            if not self.access.is_allowed(user, chat):
+                continue
+            try:
+                sent = self._send(chat, rendered, thread, parse_mode="HTML")
+            except Exception:
+                # Lifecycle delivery is advisory and must never block polling.
+                sent = None
+            if sent is None:
+                self.events.log("lifecycle_failed", kind="unconfirmed",
+                                stage="startup_notice")
 
     def _save_last(self, key: str, text: str, mode: str) -> None:
         try:
@@ -229,14 +254,17 @@ class TelegramAgyBot:
         thread = message.get("message_thread_id")
         if type(thread) is not int:
             thread = None
+        attachment_present = any(field in message for field in ATTACHMENT_FIELDS)
         photo = select_photo(message.get("photo"))
         document = None if photo else select_document(message.get("document"))
         incoming = photo or document
         content = ((message.get("caption") or "請查看附圖或文件並描述其內容。")
                    if incoming else message.get("text"))
-        if not isinstance(content, str) or not content.strip():
+        if incoming is None and attachment_present:
+            content = ""
+        elif not isinstance(content, str) or not content.strip():
             return
-        text = content.strip()
+        text = content.strip() if isinstance(content, str) else ""
         cmd, _, arg = text.partition(" ")
         cmd = "" if incoming else cmd.split("@", 1)[0].lower()
         authorized = self.access.is_allowed(user, chat_id)
@@ -247,6 +275,7 @@ class TelegramAgyBot:
                 return
             if authorized:
                 self.events.log("inbound_authorized", kind="message")
+                self._record_destination(user, chat_id, thread)
             chat_type = chat.get("type")
             if chat_type not in ("private", "group", "supergroup", "channel"):
                 chat_type = "unknown"
@@ -255,7 +284,11 @@ class TelegramAgyBot:
         if not authorized:
             return  # Nothing, including AGY/Ask/commands, for unlisted pairs.
         self.events.log("inbound_authorized", kind="message")
-        self._remember_destination(user, chat_id, thread)
+        self._record_destination(user, chat_id, thread)
+        if attachment_present and incoming is None:
+            self._send(chat_id, "Unsupported attachment. Send one supported photo or document "
+                       "within the allowed file type and size limits.", thread)
+            return
         key = scope(user, chat_id, thread)
         with self._lock:
             pending = self._pending
@@ -352,7 +385,7 @@ class TelegramAgyBot:
             else:
                 threading.Thread(target=self._quota, args=(chat_id, thread, self.sessions.get(key).get("model")),
                                  daemon=True, name="agy-quota").start()
-        elif text.startswith("/") and photo is None:
+        elif text.startswith("/") and incoming is None:
             self._send(chat_id, "Unknown command. Try /help.", thread)
         elif len(text) > 4000:
             self._send(chat_id, "Prompt exceeds 4000 characters.", thread)
@@ -660,6 +693,7 @@ class TelegramAgyBot:
             "display" if data.startswith("display:") else
             "ask" if data.startswith("ask:") else "other")
         self.events.log("callback_authorized", kind=action)
+        self._record_destination(uid, cid, thread)
         if data.startswith("stop:"):
             with self._lock:
                 task = self._active
@@ -744,9 +778,6 @@ class TelegramAgyBot:
 
     def run(self) -> None:
         self.bridge.install(self.settings.workspace)
-        with self._lock:
-            self._running = True
-        self.events.log("bot_started", stage="startup")
         try:
             offset = self.state.read()
         except (OSError, ValueError):
@@ -761,6 +792,14 @@ class TelegramAgyBot:
             except OSError:
                 self.events.log("offset_failed", kind="storage", stage="startup")
                 raise
+        with self._lock:
+            self._running = True
+        self.events.log("bot_started", stage="startup")
+        try:
+            self._notify_lifecycle()
+        except Exception:
+            # This advisory path cannot make an otherwise ready poller fail.
+            self.events.log("lifecycle_failed", kind="unknown", stage="startup_notice")
         print("Telegram polling started (AGY on demand).", flush=True)
         backoff = 2
         last_heartbeat = time.monotonic() - 60.0

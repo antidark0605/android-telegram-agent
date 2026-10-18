@@ -1,6 +1,6 @@
 """Bounded, authorized Telegram photo/document downloads for one AGY task.
 
-Revision: 1 — 2026-10-18.
+Revision: 2 — 2026-10-18.
 
 The caller performs the user/chat/topic authorization before invoking these
 helpers.  This module only accepts Telegram file identifiers and keeps the
@@ -28,16 +28,21 @@ REMOTE_PATH = re.compile(r"[A-Za-z0-9_./-]{1,512}")
 # the bot invoke a tool merely by choosing an arbitrary MIME type.
 DOCUMENT_MIME = frozenset({
     "application/pdf", "application/zip", "application/json",
-    "application/octet-stream", "text/plain", "text/csv", "text/html",
+    "application/octet-stream", "text/plain", "text/markdown", "text/csv", "text/html",
     "image/jpeg", "image/png", "image/webp", "audio/mpeg", "audio/mp4",
     "video/mp4",
 })
-MIME_SUFFIX = {
-    "application/pdf": ".pdf", "application/zip": ".zip",
-    "application/json": ".json", "application/octet-stream": ".bin",
-    "text/plain": ".txt", "text/csv": ".csv", "text/html": ".html",
-    "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp",
-    "audio/mpeg": ".mp3", "audio/mp4": ".m4a", "video/mp4": ".mp4",
+MIME_SUFFIXES = {
+    "application/pdf": frozenset({".pdf"}), "application/zip": frozenset({".zip"}),
+    "application/json": frozenset({".json"}),
+    "application/octet-stream": frozenset({".bin"}),
+    # Telegram commonly labels Markdown documents as text/plain.
+    "text/plain": frozenset({".txt", ".md"}),
+    "text/markdown": frozenset({".md"}), "text/csv": frozenset({".csv"}),
+    "text/html": frozenset({".html"}), "image/jpeg": frozenset({".jpg"}),
+    "image/png": frozenset({".png"}), "image/webp": frozenset({".webp"}),
+    "audio/mpeg": frozenset({".mp3"}), "audio/mp4": frozenset({".m4a"}),
+    "video/mp4": frozenset({".mp4"}),
 }
 
 
@@ -56,8 +61,8 @@ def _safe_filename(value: object, mime: str) -> str:
             or any(ord(c) < 32 or ord(c) == 127 for c in value)):
         raise ValueError("Unsafe incoming filename")
     suffix = Path(value).suffix.lower()
-    expected = MIME_SUFFIX.get(mime)
-    if expected and suffix and suffix != expected:
+    expected = MIME_SUFFIXES.get(mime)
+    if not expected or suffix not in expected:
         raise ValueError("Incoming filename MIME mismatch")
     return value
 
@@ -163,9 +168,9 @@ def download_media(api, media: dict, workspace: Path, cancelled=None,
     folder = _check_folder(workspace, directory_name)
     suffix = ".bin"
     if media["kind"] == "document":
-        suffix = MIME_SUFFIX[media["mime_type"]]
         # The filename is checked even though it is not used as a path.
-        _safe_filename(media["file_name"], media["mime_type"])
+        filename = _safe_filename(media["file_name"], media["mime_type"])
+        suffix = Path(filename).suffix.lower()
     fd, name = tempfile.mkstemp(prefix="incoming-", suffix=suffix, dir=folder)
     saved = Path(name)
     try:
