@@ -16,7 +16,7 @@ Small non-root **Termux + Telegram + official AGY CLI** Bot for Android. Origina
 | /new | Reset this Topic's AGY conversation (keeps its model and display selections) |
 | /status | Show running/idle, CWD, native AGY conversation ID, selected model/variant and last reported model, YOLO setting |
 | /model | Pick a model/variant from `agy models`; **per Topic** |
-| /format (`/display` alias) | Pick `rich`, `classic` or `raw` (unformatted body) reply transport; **per Topic** |
+| /format | Pick `rich`, `classic` or `raw` (unformatted body) reply transport; **per Topic** |
 | /last | Manually resend the bounded, private last reply for this Topic |
 | /session start | Activate the current chat/Topic without submitting a prompt; keep the configured workspace |
 | /ls | List the configured workspace using `ls -l`, without arbitrary arguments |
