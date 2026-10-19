@@ -269,8 +269,12 @@ class BotTests(unittest.TestCase):
     def test_display_and_last_are_scoped_to_current_topic(self):
         from sessions import scope
         key = scope(101, 202, None)
-        self.bot.handle_update(update("/display classic"))
+        self.bot.handle_update(update("/format classic"))
         self.assertEqual(self.bot.sessions.get(key)["display_mode"], "classic")
+        before = len(self.api.sent)
+        self.bot.handle_update(update("/display raw"))
+        self.assertEqual(self.bot.sessions.get(key)["display_mode"], "classic")
+        self.assertIn("Unknown command", self.api.sent[before][1])
         self.bot._save_last(key, "⚡ [AGY] · gemini-test\n\nanswer", "classic")
         before = len(self.api.sent)
         self.bot.handle_update(update("/last"))
