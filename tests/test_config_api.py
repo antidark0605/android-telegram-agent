@@ -6,7 +6,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from config import ConfigError, load_settings
-from telegram_api import TelegramAPI, split_text
+from telegram_api import TelegramAPI, TelegramError, split_text
+from command_menu import telegram_commands
 
 
 class ConfigurationTests(unittest.TestCase):
@@ -103,6 +104,40 @@ class MessageTests(unittest.TestCase):
         with patch.object(api, "_call", return_value=[]) as call:
             self.assertEqual(api.get_updates(0), [])
         self.assertIn("callback_query", call.call_args.args[1]["allowed_updates"])
+
+    def test_command_menu_get_set_and_validation(self):
+        api = TelegramAPI("dummy-token")
+        commands = telegram_commands()
+        remote = [dict(item, is_ephemeral=False) for item in commands]
+        with patch.object(api, "_call", side_effect=[remote, True, True]) as call:
+            self.assertEqual(api.get_my_commands(), commands)
+            api.set_my_commands(commands)
+            api.delete_my_commands("all_private_chats")
+        self.assertEqual(call.call_args_list[0].args[0], "getMyCommands")
+        self.assertEqual(call.call_args_list[1].args,
+                         ("setMyCommands", {"commands": commands}))
+        self.assertEqual(call.call_args_list[2].args,
+                         ("deleteMyCommands",
+                          {"scope": {"type": "all_private_chats"}}))
+        with patch.object(api, "_call", return_value={}):
+            with self.assertRaises(TelegramError) as caught:
+                api.get_my_commands()
+        self.assertEqual(caught.exception.kind, "protocol")
+        with patch.object(api, "_call") as call:
+            with self.assertRaises(TelegramError) as caught:
+                api.set_my_commands([{"command": "model"}])
+        call.assert_not_called()
+        self.assertEqual(caught.exception.kind, "protocol")
+        for bad in ([{"command": "Bad", "description": "x"}],
+                    [{"command": "x", "description": ""}]):
+            with patch.object(api, "_call") as call:
+                with self.assertRaises(TelegramError):
+                    api.set_my_commands(bad)
+            call.assert_not_called()
+        with patch.object(api, "_call") as call:
+            with self.assertRaises(TelegramError):
+                api.get_my_commands("chat")
+        call.assert_not_called()
 
     def test_send_text_keyboard_and_message_id(self):
         api = TelegramAPI("dummy-token")

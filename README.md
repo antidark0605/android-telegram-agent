@@ -24,6 +24,14 @@ Small non-root **Termux + Telegram + official AGY CLI** Bot for Android. Origina
 | /quota, /usage | Request AGY's standalone /usage rate-limit report, if supported |
 | Inline 🛑 中斷 (Stop) | Cancel that active AGY task; no /cancel command |
 
+At startup, the Bot compares Telegram's default command menu with this implemented
+command set, replaces stale metadata through `setMyCommands` only when needed, and
+confirms the result through `getMyCommands`. A menu-sync failure is recorded without
+blocking polling. Telegram stores this menu independently from message routing, so a
+removed command can remain visible until this synchronization or a BotFather update.
+The standard private/group category scopes are cleared to inherit the same default;
+the Bot does not create per-chat or per-language command overrides.
+
 Each task sends one formatted progress status message (state and elapsed seconds) with 🛑 中斷 (Stop), edited in place around every five seconds, and a separate final answer. Stop is tied to the authorized user, chat, exact status-message ID and unique task key. While the answer is being delivered the status shows *Delivering* without Stop; it shows completed only after Telegram acknowledges the answer, otherwise *Delivery unconfirmed*. Once finished, the button is removed. `/status` remains a plain-text summary. One AGY process at a time prevents memory spikes on small devices.
 
 **Topics:** A fresh chat/Topic requires `/session start` before ordinary text can run AGY. This activates the current scope; it does not create a Telegram Topic. A pre-existing saved AGY conversation remains activated. The private chat (no Topic) has its own separate Session. Each Telegram `message_thread_id` has a separate AGY conversation ID, Model selection and last task token accounting. A new Topic does not require creating another Bot Token. `/new` resets only the current Topic while preserving its model and display mode. Restarting the Bot preserves its Session mappings in a private JSON file. Invalid/corrupted state stops startup rather than silently erasing conversations; a failed persistence operation never updates the in-memory mapping.

@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 from agy import AgentResult
 from bot import Task, TelegramAgyBot, status_text
 from config import Settings
+from command_menu import telegram_commands
 
 
 def update(text, user=101, chat=202, topic=None, chat_type="private", is_bot=False):
@@ -73,6 +74,32 @@ class BotTests(unittest.TestCase):
         self.addCleanup(quota_patch.stop)
         from sessions import scope
         self.bot.sessions.change(scope(101, 202, None), model="gemini-3.8-flash-high", started=True)
+
+    def test_command_menu_matches_routes_and_replaces_stale_models(self):
+        expected = telegram_commands()
+        names = [item["command"] for item in expected]
+        self.assertIn("model", names)
+        self.assertNotIn("models", names)
+        self.api.get_my_commands = MagicMock(side_effect=[
+            [{"command": "models", "description": "Stale menu"}], expected,
+            [{"command": "models", "description": "Stale private menu"}], [],
+            [], []])
+        self.api.set_my_commands = MagicMock()
+        self.api.delete_my_commands = MagicMock()
+        self.bot._sync_command_menu()
+        self.api.set_my_commands.assert_called_once_with(expected)
+        self.api.delete_my_commands.assert_called_once_with("all_private_chats")
+        records = self.bot.events.path.read_text(encoding="utf8")
+        self.assertIn('"event":"command_menu_ok"', records)
+
+    def test_command_menu_failure_does_not_block_startup(self):
+        self.api.get_my_commands = MagicMock(
+            side_effect=__import__("telegram_api").TelegramError(
+                "synthetic secret", kind="transport"))
+        self.bot._sync_command_menu()
+        records = self.bot.events.path.read_text(encoding="utf8")
+        self.assertIn('"event":"command_menu_failed"', records)
+        self.assertNotIn("synthetic secret", records)
 
     def photo_update(self, caption=None, user=101):
         item = update("", user=user)
