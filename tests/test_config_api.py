@@ -105,6 +105,16 @@ class MessageTests(unittest.TestCase):
             self.assertEqual(api.get_updates(0), [])
         self.assertIn("callback_query", call.call_args.args[1]["allowed_updates"])
 
+    def test_get_me_requires_confirmed_bot_identity(self):
+        api = TelegramAPI("dummy-token")
+        with patch.object(api, "_call", return_value={"is_bot": True}) as call:
+            self.assertTrue(api.get_me()["is_bot"])
+        self.assertEqual(call.call_args.args, ("getMe", {}))
+        with patch.object(api, "_call", return_value={"is_bot": False}):
+            with self.assertRaises(TelegramError) as caught:
+                api.get_me()
+        self.assertEqual(caught.exception.kind, "protocol")
+
     def test_command_menu_get_set_and_validation(self):
         api = TelegramAPI("dummy-token")
         commands = telegram_commands()

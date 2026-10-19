@@ -69,6 +69,14 @@ class TelegramAPI:
             raise TelegramError("Telegram returned an invalid updates list", kind="protocol")
         return result
 
+    def get_me(self) -> dict:
+        """Confirm that the credential belongs to a Bot without exposing identity."""
+        result = self._call("getMe", {}, timeout=10)
+        if not isinstance(result, dict) or result.get("is_bot") is not True:
+            raise TelegramError("Telegram returned an invalid Bot identity",
+                                kind="protocol")
+        return result
+
     @staticmethod
     def _command_scope(scope: str | None) -> dict:
         allowed = {"all_private_chats", "all_group_chats",
