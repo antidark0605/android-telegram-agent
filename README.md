@@ -140,6 +140,12 @@ Run:
 python bot.py --config "$HOME/.config/android-telegram-agent/config.json"
 ```
 
+For a repeatable home-device installation, pinned upgrades, rollback, safe doctor
+output and a `termux-services` template, follow
+[`docs/service-setup.md`](docs/service-setup.md). The release tools never copy or
+modify private config, workspace, credentials or session state, and never restart a
+service automatically.
+
 `task_timeout_seconds: null` means no Python-imposed task deadline. `print_timeout: "24h"` extends the **separate AGY Headless deadline**: it is **not literally unlimited**. The installed CLI must accept this duration. The Stop button remains available. Owners can choose another valid AGY duration. Device testing should verify actual long runs, cancellation and cleanup before assuming robust background behavior.
 
 **YOLO warning:** `yolo: true` adds `--dangerously-skip-permissions` to AGY invocation, allowing AGY to auto-approve tool operations accessible to its Android UID. This greatly expands what remotely submitted prompts can do. Public sample is deliberately `false`. Enable it **only in a trusted, private deployment under explicit owner approval**, restrict Bot access with the user/chat allowlist, and use a dedicated workspace. A working directory is **not a filesystem security boundary**. The Bot does not change global AGY permission settings.

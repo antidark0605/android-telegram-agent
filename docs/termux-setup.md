@@ -1,6 +1,6 @@
 # Termux 依賴與安裝
 
-Revision: 4 — 2026-10-19
+Revision: 5 — 2026-10-19
 
 適用於 `antidark0605/android-telegram-agent` 的 AGY 對話版本。以下命令在 Android **Termux App 前景、一般使用者**執行，不在電腦或 root ADB shell 執行。本文是安裝指南，不授權變更已有服務或認證。
 
@@ -75,6 +75,10 @@ python -m compileall -q .
 ```
 
 此命令取得預設分支；審查中的版本須另核對指定 PR 的最新提交，不假設預設分支已含該版本。使用已存在的 checkout 時保留未提交檔案，另建隔離目錄。合成測試顯示 `OK`、編譯無錯誤才通過；測試使用假程序與訊息，不能當真實 Telegram 往返 PASS。來源：[README Tests](../README.md#tests-and-acceptance)、[`tests/`](../tests/)。
+
+多機器、常駐、版本化升級與回滾使用
+[`service-setup.md`](service-setup.md) 的固定 commit release 流程；不要以無條件
+`git pull` 直接改寫正在運行的版本。
 
 ## 5. 私有設定與啟動
 
