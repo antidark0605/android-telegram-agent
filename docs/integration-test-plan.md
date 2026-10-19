@@ -1,6 +1,6 @@
 # One-pass Android AGY Telegram acceptance plan
 
-Revision: 3 (2026-10-13) — Telegram chat/user authorization and ID discovery.
+Revision: 4 (2026-10-19) — Telegram command-menu synchronization.
 
 Run once against the same PR build in isolated non-root Termux. Preserve the existing running Bot; only one poller per Bot token. Do not publish secrets or raw private transcripts.
 
@@ -9,7 +9,7 @@ Run once against the same PR build in isolated non-root Termux. Preserve the exi
 | A01 | Non-root boot, /start, /status, text | Real cloud AGY response in original chat |
 | A02 | Two successive messages, same Topic | Explicit conversation ID reused |
 | A03 | Alternate Topic A and B, then /new in A | Separate AGY conversations, B unchanged |
-| A04 | /models and /model switch in Topic A | Real selected AGY model used only by A |
+| A04 | `/model` switch in Topic A; `/models` rejection | Real selected AGY model used only by A; stale command is absent from the Telegram menu |
 | A05 | Restart Bot and repeat A/B | Model and session state preserved |
 | A06 | More than 45 seconds task | No Python deadline when config is null; AGY print ceiling verified |
 | A07 | Timer update, press inline Stop | Same status message edited, owned process group ended |

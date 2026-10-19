@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import socket
 import urllib.error
 import urllib.request
@@ -67,6 +68,63 @@ class TelegramAPI:
         if not isinstance(result, list):
             raise TelegramError("Telegram returned an invalid updates list", kind="protocol")
         return result
+
+    @staticmethod
+    def _command_scope(scope: str | None) -> dict:
+        allowed = {"all_private_chats", "all_group_chats",
+                   "all_chat_administrators"}
+        if scope is None:
+            return {}
+        if scope not in allowed:
+            raise TelegramError("Unsupported Telegram command scope",
+                                kind="protocol")
+        return {"scope": {"type": scope}}
+
+    def get_my_commands(self, scope: str | None = None) -> list[dict[str, object]]:
+        """Read a language-neutral command menu for one bounded scope."""
+        result = self._call("getMyCommands", self._command_scope(scope), timeout=10)
+        if not isinstance(result, list):
+            raise TelegramError("Telegram returned an invalid command list",
+                                kind="protocol")
+        commands = []
+        for item in result:
+            if (not isinstance(item, dict)
+                    or not isinstance(item.get("command"), str)
+                    or not isinstance(item.get("description"), str)):
+                raise TelegramError("Telegram returned an invalid command entry",
+                                    kind="protocol")
+            command = {"command": item["command"],
+                       "description": item["description"]}
+            ephemeral = item.get("is_ephemeral", False)
+            if type(ephemeral) is not bool:
+                raise TelegramError("Telegram returned an invalid command entry",
+                                    kind="protocol")
+            if ephemeral:
+                command["is_ephemeral"] = True
+            commands.append(command)
+        return commands
+
+    def delete_my_commands(self, scope: str) -> None:
+        """Clear a category override so it inherits the canonical default menu."""
+        if self._call("deleteMyCommands", self._command_scope(scope), timeout=10) is not True:
+            raise TelegramError("Telegram did not confirm command-menu deletion",
+                                kind="protocol")
+
+    def set_my_commands(self, commands: list[dict[str, str]]) -> None:
+        """Replace the default, language-neutral command menu."""
+        if not isinstance(commands, list) or len(commands) > 100:
+            raise TelegramError("Invalid Telegram command payload", kind="protocol")
+        for item in commands:
+            if (not isinstance(item, dict)
+                    or set(item) != {"command", "description"}
+                    or not isinstance(item["command"], str)
+                    or not isinstance(item["description"], str)
+                    or re.fullmatch(r"[a-z0-9_]{1,32}", item["command"]) is None
+                    or not 1 <= len(item["description"]) <= 256):
+                raise TelegramError("Invalid Telegram command payload", kind="protocol")
+        if self._call("setMyCommands", {"commands": commands}, timeout=10) is not True:
+            raise TelegramError("Telegram did not confirm the command menu",
+                                kind="protocol")
 
     def send_text(self, chat_id: int, text: str, thread_id: int | None = None,
                   reply_markup: dict | None = None,

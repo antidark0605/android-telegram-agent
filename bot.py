@@ -17,6 +17,7 @@ from incoming_photo import download_photo
 from agy import AgyRunner, list_models
 from ask_bridge import AskBridge
 from config import ConfigError, Settings, load_settings
+from command_menu import INHERITED_COMMAND_SCOPES, telegram_commands
 from diagnostics import EventLogger
 from last_store import LastStore
 from lifecycle_store import LifecycleStore
@@ -115,6 +116,30 @@ class TelegramAgyBot:
         self._started_at = datetime.now(timezone.utc)
         self._lifecycle_attempted: set[tuple[int, int]] = set()
         self.quota = QuotaService(settings.agy_command, settings.workspace)
+
+    def _sync_command_menu(self) -> None:
+        """Make Telegram's server-side menu match the implemented routes."""
+        expected = telegram_commands()
+        try:
+            current = self.api.get_my_commands()
+            if current != expected:
+                self.api.set_my_commands(expected)
+                current = self.api.get_my_commands()
+            if current != expected:
+                raise TelegramError("Telegram command menu was not confirmed",
+                                    kind="protocol")
+            for command_scope in INHERITED_COMMAND_SCOPES:
+                if self.api.get_my_commands(command_scope):
+                    self.api.delete_my_commands(command_scope)
+                    if self.api.get_my_commands(command_scope):
+                        raise TelegramError("Telegram scoped menu was not cleared",
+                                            kind="protocol")
+        except (TelegramError, AttributeError, TypeError):
+            # Menu metadata is advisory; task polling must remain available.
+            self.events.log("command_menu_failed", stage="command_menu")
+            return
+        self.events.log("command_menu_ok", stage="command_menu",
+                        count=len(expected))
 
     def _send(self, chat: int, text: str, thread: int | None = None,
               markup: dict | None = None, parse_mode: str | None = None) -> int | None:
@@ -792,6 +817,7 @@ class TelegramAgyBot:
             except OSError:
                 self.events.log("offset_failed", kind="storage", stage="startup")
                 raise
+        self._sync_command_menu()
         with self._lock:
             self._running = True
         self.events.log("bot_started", stage="startup")
