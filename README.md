@@ -16,7 +16,7 @@ Small non-root **Termux + Telegram + official AGY CLI** Bot for Android. Origina
 | /new | Reset this Topic's AGY conversation (keeps its model and display selections) |
 | /status | Show running/idle, CWD, native AGY conversation ID, selected model/variant and last reported model, YOLO setting |
 | /model | Pick a model/variant from `agy models`; **per Topic** |
-| /display | Pick `rich`, `classic` or `raw` (unformatted body) reply transport; **per Topic** |
+| /format (`/display` alias) | Pick `rich`, `classic` or `raw` (unformatted body) reply transport; **per Topic** |
 | /last | Manually resend the bounded, private last reply for this Topic |
 | /session start | Activate the current chat/Topic without submitting a prompt; keep the configured workspace |
 | /ls | List the configured workspace using `ls -l`, without arbitrary arguments |
@@ -186,7 +186,7 @@ python -m unittest discover -s tests -v
 **One-pass device acceptance plan:**
 
 1. Verify a clean non-root Termux run, real Telegram text/AGY response and separate Bot status updates. Record only sanitized results.
-2. Activate with `/session start`, select `/model`, choose each `/display` mode, then use plain DM twice and confirm AGY Conversation ID stays the same. Create two Telegram Topics; interleave prompts and confirm distinct IDs, display mode, model selection and answer routing; restart Bot and resume each Topic; `/new` resets only one; `/last` only resends the current Topic's bounded saved answer.
+2. Activate with `/session start`, select `/model`, choose each `/format` mode, then use plain DM twice and confirm AGY Conversation ID stays the same. Create two Telegram Topics; interleave prompts and confirm distinct IDs, display mode, model selection and answer routing; restart Bot and resume each Topic; `/new` resets only one; `/last` only resends the current Topic's bounded saved answer.
 3. Open `/model`, select a real model, check the **next AGY process argv** uses that slug, change another Topic and ensure no cross-over. Verify `/models` is unknown, `/model default` is rejected and stale/foreign buttons cannot change model state.
 4. Verify this trusted deployment's `yolo` value and exact AGY argv flag, with a harmless controlled tool action. Do not run destructive prompts or modify global AGY settings.
 5. Run an extended, non-destructive task: confirm status edits at ~5s intervals, press inline 🛑 Stop, ensure only that process group exits, old button is inert, and the next prompt succeeds. Confirm no `/cancel` command is offered or executed. Check AGY's own configured Headless ceiling.

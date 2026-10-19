@@ -309,7 +309,7 @@ class TelegramAgyBot:
                        "/myid: show your user/chat/topic IDs\n"
                        "/new: start new conversation in this topic\n"
                        "/model: choose an explicit model\n"
-                       "/display: choose rich/classic/raw reply display\n"
+                       "/format: choose rich/classic/raw reply display (/display alias)\n"
                        "/last: manually resend the last saved reply\n"
                        "/ls: list workspace files (ls -l)\n"
                        "/status, /context, /quota: show status\n"
@@ -356,7 +356,7 @@ class TelegramAgyBot:
                 self._send(chat_id, "Use /model and choose an explicit model.", thread)
             else:
                 self._models(user, chat_id, thread, key)
-        elif cmd == "/display":
+        elif cmd in ("/format", "/display"):
             self._display(user, chat_id, thread, key, arg.strip())
         elif cmd == "/last":
             self._last_reply(chat_id, thread, key)
@@ -448,7 +448,7 @@ class TelegramAgyBot:
             return
         if requested:
             if requested not in DISPLAY_MODES:
-                self._send(chat, "Use /display with rich, classic or raw.", thread)
+                self._send(chat, "Use /format with rich, classic or raw.", thread)
                 return
             try:
                 self.sessions.change(key, display_mode=requested)
