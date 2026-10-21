@@ -1,6 +1,6 @@
 # Termux 版本化部署與常駐服務
 
-Revision: 1 — 2026-10-19
+Revision: 2 — 2026-10-22
 
 本文件適用於非 root Termux。私人 config、Token、AGY 登入資料與 workspace
 不得放入 Git checkout 或 release 目錄。先依
@@ -8,7 +8,9 @@ Revision: 1 — 2026-10-19
 
 ## 版本化安裝
 
-先取得公開 repository，並選擇已 review、已在 `origin/main` 的完整 commit SHA：
+先取得公開 repository，並選擇已 review、已在 `origin/main` 的完整 commit SHA。
+Termux 沒有 Linux 的 `/usr/bin/env` 絕對路徑，因此以下 release shell scripts 必須明確由
+`bash` 執行：
 
 ```sh
 git clone https://github.com/antidark0605/android-telegram-agent.git
@@ -16,7 +18,7 @@ cd android-telegram-agent
 git fetch --prune origin main
 APPROVED_COMMIT="填入已核對的完整40字元commit SHA"
 git merge-base --is-ancestor "$APPROVED_COMMIT" origin/main
-scripts/install-termux.sh \
+bash scripts/install-termux.sh \
   --ref "$APPROVED_COMMIT" \
   --config "$HOME/.config/android-telegram-agent/config.json"
 ```
@@ -36,7 +38,7 @@ release／review 紀錄確認核准版本。安裝工具使用 `git archive`，�
 git fetch --prune origin main
 APPROVED_COMMIT="填入新的完整40字元commit SHA"
 git merge-base --is-ancestor "$APPROVED_COMMIT" origin/main
-scripts/upgrade-termux.sh \
+bash scripts/upgrade-termux.sh \
   --ref "$APPROVED_COMMIT" \
   --config "$HOME/.config/android-telegram-agent/config.json"
 ```
@@ -47,7 +49,7 @@ scripts/upgrade-termux.sh \
 切回上一個已安裝且有版本 marker 的 release：
 
 ```sh
-scripts/rollback-termux.sh \
+bash scripts/rollback-termux.sh \
   --config "$HOME/.config/android-telegram-agent/config.json"
 ```
 
