@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -22,7 +23,7 @@ class ReleaseToolTests(unittest.TestCase):
 
     def run_tool(self, name, *args, check=True):
         return subprocess.run(
-            [str(ROOT / "scripts" / name), *map(str, args)],
+            ["bash", str(ROOT / "scripts" / name), *map(str, args)],
             cwd=ROOT, env=self.env, text=True, capture_output=True,
             timeout=60, check=check)
 
@@ -99,6 +100,24 @@ class ReleaseToolTests(unittest.TestCase):
                             check=False)
         self.assertNotEqual(bad.returncode, 0)
         self.assertNotIn(str(self.home), bad.stdout + bad.stderr)
+
+    def test_upgrade_invokes_non_executable_installer_through_bash(self):
+        repo, _ = self.fake_repo()
+        commit = subprocess.check_output(["git", "rev-parse", "HEAD"],
+                                         cwd=repo, text=True).strip()
+        scripts = self.home / "copied-scripts"
+        scripts.mkdir()
+        for name in ("install-termux.sh", "upgrade-termux.sh"):
+            target = scripts / name
+            shutil.copyfile(ROOT / "scripts" / name, target)
+            target.chmod(0o644)
+        install_root = self.home / "opt" / "copied-install"
+        result = subprocess.run(
+            ["bash", str(scripts / "upgrade-termux.sh"), "--source", str(repo),
+             "--ref", commit, "--install-root", str(install_root)],
+            cwd=ROOT, env=self.env, text=True, capture_output=True,
+            timeout=60, check=True)
+        self.assertEqual(result.stdout.strip(), "INSTALL_OK " + commit)
 
     def test_doctor_is_fixed_output_and_does_not_run_agy(self):
         private = self.home / ".config" / "android-telegram-agent"

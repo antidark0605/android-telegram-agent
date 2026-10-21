@@ -35,4 +35,4 @@ args=(--source "$source_dir" --ref "$git_ref" --install-root "$install_root")
 if [[ -n $config_path ]]; then
     args+=(--config "$config_path")
 fi
-exec "$script_dir/install-termux.sh" "${args[@]}"
+exec bash "$script_dir/install-termux.sh" "${args[@]}"
