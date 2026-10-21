@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -89,6 +90,64 @@ class BridgeTests(unittest.TestCase):
             config.chmod(0o600)
             with self.assertRaises(ValueError):
                 AskBridge(root / "ask").install(workspace)
+
+    def test_config_migrates_managed_entry_from_prior_release(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            workspace = root / "workspace"
+            agents = workspace / ".agents"
+            agents.mkdir(parents=True, mode=0o700)
+            agents.chmod(0o700)
+            bridge = AskBridge(root / "ask")
+            config = agents / "mcp_config.json"
+            config.write_text(json.dumps({"mcpServers": {"other": {"command": "safe"},
+                "telegram-ask": {
+                "command": sys.executable,
+                "args": [str(root / "prior-release" / "ask_bridge.py"),
+                         "mcp", str(bridge.directory)]}}}), encoding="utf8")
+            config.chmod(0o600)
+            bridge.install(workspace)
+            servers = json.loads(config.read_text())["mcpServers"]
+            entry = servers["telegram-ask"]
+            self.assertEqual(entry["command"], sys.executable)
+            self.assertEqual(entry["args"][0], str(Path(__import__(
+                "ask_bridge").__file__).resolve()))
+            self.assertEqual(servers["other"], {"command": "safe"})
+            self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+
+    def test_config_rejects_managed_shape_for_another_bridge_directory(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            workspace = root / "workspace"
+            agents = workspace / ".agents"
+            agents.mkdir(parents=True, mode=0o700)
+            agents.chmod(0o700)
+            bridge = AskBridge(root / "ask")
+            config = agents / "mcp_config.json"
+            config.write_text(json.dumps({"mcpServers": {"telegram-ask": {
+                "command": sys.executable,
+                "args": [str(root / "prior-release" / "ask_bridge.py"),
+                         "mcp", str(root / "other-bridge")]}}}), encoding="utf8")
+            config.chmod(0o600)
+            with self.assertRaises(ValueError):
+                bridge.install(workspace)
+
+    def test_managed_entry_requires_exact_safe_shape(self):
+        with tempfile.TemporaryDirectory() as td:
+            bridge = AskBridge(Path(td) / "ask")
+            script = str(Path(td) / "release" / "ask_bridge.py")
+            valid = {"command": sys.executable,
+                     "args": [script, "mcp", str(bridge.directory)]}
+            self.assertTrue(bridge._managed_entry(valid))
+            invalid = [
+                {**valid, "env": {}},
+                {**valid, "command": "/different/python"},
+                {**valid, "args": ["ask_bridge.py", "mcp", str(bridge.directory)]},
+                {**valid, "args": [str(Path(td) / "other.py"), "mcp",
+                                    str(bridge.directory)]},
+                {**valid, "args": [script, "other", str(bridge.directory)]},
+            ]
+            self.assertTrue(all(not bridge._managed_entry(value) for value in invalid))
 
     def test_install_rejects_symlinked_agents_and_config(self):
         with tempfile.TemporaryDirectory() as td:
