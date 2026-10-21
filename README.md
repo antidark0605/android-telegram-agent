@@ -1,8 +1,12 @@
 # android-telegram-agent
 
-Revision: 6 — 2026-10-18
+Revision: 7 — 2026-10-21
 
 Small non-root **Termux + Telegram + official AGY CLI** Bot for Android. Original Python standard-library code, not a port of another private codebase. No root, inbound ports, OpenClaw, collaboration, kanban, server framework, or pip dependencies.
+
+Coding and deployment agents must read the repository-wide [`AGENTS.md`](AGENTS.md)
+before changing code, configuration or a device. Human installers can start with the
+Termux and service guides linked below.
 
 **Validation scope:** The basic Telegram ↔ AGY text round trip has been exercised in a non-root Termux environment. The integrated session, MCP and interactive controls require separate acceptance testing. Device-specific test environments, identifiers and results are intentionally kept outside this public repository.
 
