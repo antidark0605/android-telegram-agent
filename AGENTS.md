@@ -1,6 +1,6 @@
 # android-telegram-agent 開發規範
 
-Revision: 1 — 2026-10-21
+Revision: 2 — 2026-10-21
 
 ## 適用範圍
 
@@ -67,11 +67,3 @@ Revision: 1 — 2026-10-21
 - AGY permissions: https://www.antigravity.google/docs/permissions?tab=cli
 - Termux: https://github.com/termux/termux-app
 - termux-services: https://github.com/termux/termux-services
-
-## 術語白話解釋
-
-- sandbox：限制程式可以存取哪些檔案、程序與網路的隔離機制。
-- long polling／poller：Bot 持續向 Telegram 要求新訊息的方式／執行這項工作的程序。
-- mock／synthetic executable：以假的介面或可執行檔重現受控行為，不接觸真實服務。
-- metadata／provenance：commit 的作者等附加資料／記錄 agent 參與來源的資訊。
-- live PASS／NOT VERIFIED：真實裝置與服務已通過／尚未完成真實環境驗證。
