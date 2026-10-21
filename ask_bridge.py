@@ -22,6 +22,18 @@ class AskBridge:
             path.chmod(0o700)
         self.active = directory / "active.json"
 
+    def _managed_entry(self, value: object) -> bool:
+        """Recognize this Bot's prior release entry without executing it."""
+        if not isinstance(value, dict) or set(value) != {"command", "args"}:
+            return False
+        args = value.get("args")
+        if (value.get("command") != sys.executable or not isinstance(args, list)
+                or len(args) != 3 or not all(isinstance(item, str) for item in args)):
+            return False
+        script = Path(args[0])
+        return (script.is_absolute() and script.name == "ask_bridge.py"
+                and args[1] == "mcp" and args[2] == str(self.directory))
+
     def install(self, workspace: Path) -> None:
         """Merge one scoped MCP server into the workspace, never global settings."""
         agents = workspace / ".agents"
@@ -66,7 +78,8 @@ class AskBridge:
             raise ValueError("Invalid workspace MCP servers.")
         entry = {"command": sys.executable,
                  "args": [str(Path(__file__).resolve()), "mcp", str(self.directory)]}
-        if "telegram-ask" in servers and servers["telegram-ask"] != entry:
+        if ("telegram-ask" in servers and servers["telegram-ask"] != entry
+                and not self._managed_entry(servers["telegram-ask"])):
             raise ValueError("Workspace has a conflicting telegram-ask MCP server.")
         servers["telegram-ask"] = entry
         if agents.is_symlink() or config.is_symlink():
