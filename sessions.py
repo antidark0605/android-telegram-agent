@@ -57,12 +57,13 @@ class SessionStore:
             self.data = candidate
             return dict(row)
 
-    def reset(self, key: str) -> None:
+    def reset(self, key: str, *, cwd: str | None = None) -> None:
         with self.lock:
             row = self.data.get(key, {})
             candidate = dict(self.data)
             candidate[key] = {"model": row.get("model"),
                               "display_mode": row.get("display_mode", "rich"),
+                              "cwd": row.get("cwd", ".") if cwd is None else cwd,
                               "started": row.get("started") is True or bool(row.get("conversation_id"))}
             write_private(self.path, candidate)
             self.data = candidate

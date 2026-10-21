@@ -198,6 +198,18 @@ class TelegramAPI:
             "show_alert": False,
         }, timeout=10)
 
+    def send_chat_action(self, chat_id: int, action: str = "typing",
+                         thread_id: int | None = None) -> None:
+        """Publish one bounded activity indication to the current chat/topic."""
+        if action != "typing":
+            raise TelegramError("Unsupported chat action", kind="protocol")
+        data = {"chat_id": chat_id, "action": action}
+        if thread_id is not None:
+            data["message_thread_id"] = thread_id
+        if self._call("sendChatAction", data, timeout=10) is not True:
+            raise TelegramError("Telegram did not confirm chat action",
+                                kind="protocol")
+
 
 def _check_formatted(text: str) -> str:
     """Reject formatted text over FORMATTED_TEXT_LIMIT UTF-16 units; never split it."""

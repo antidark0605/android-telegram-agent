@@ -90,10 +90,22 @@ class DisplayAndLastTests(unittest.TestCase):
                 store.save(str(i), "answer", "raw")
             self.assertIsNone(store.get("0"))
             self.assertEqual(store.get(str(MAX_ENTRIES + 1))["mode"], "raw")
+            self.assertEqual(store.get(str(MAX_ENTRIES + 1))["cwd"], ".")
             rows = json.loads(store.path.read_text())
             self.assertLessEqual(len(rows), MAX_ENTRIES)
             with patch("last_store.time.time", return_value=10**12):
                 self.assertIsNone(store.get(str(MAX_ENTRIES + 1)))
+
+    def test_last_store_preserves_saved_cwd_and_reads_legacy_rows(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = LastStore(Path(td) / "last.json")
+            store.save("new", "answer", "raw", "work/original")
+            self.assertEqual(store.get("new")["cwd"], "work/original")
+            rows = json.loads(store.path.read_text())
+            rows["legacy"] = {"saved_at": __import__("time").time(),
+                              "mode": "classic", "text": "old"}
+            store.path.write_text(json.dumps(rows), encoding="utf8")
+            self.assertEqual(store.get("legacy")["cwd"], ".")
 
 
 class TransportBoundaryTests(unittest.TestCase):

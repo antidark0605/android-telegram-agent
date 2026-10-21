@@ -1,6 +1,6 @@
 """Bounded private per-topic manual resend state.
 
-Revision: 1 — 2026-10-18.  This is a user-requested retry mechanism, not an
+Revision: 2 — 2026-10-21.  This is a user-requested retry mechanism, not an
 exactly-once queue: an ambiguous Telegram send is never replayed automatically.
 """
 from __future__ import annotations
@@ -29,8 +29,9 @@ class LastStore:
             return {}
         return value if isinstance(value, dict) else {}
 
-    def save(self, key: str, text: str, mode: str) -> None:
-        if not isinstance(key, str) or not isinstance(text, str):
+    def save(self, key: str, text: str, mode: str, cwd: str = ".") -> None:
+        if (not isinstance(key, str) or not isinstance(text, str)
+                or not isinstance(cwd, str)):
             raise ValueError("Invalid last response")
         if len(text) > MAX_TEXT:
             text = text[:MAX_TEXT] + "\n[Last response truncated]"
@@ -39,7 +40,7 @@ class LastStore:
         rows = {k: v for k, v in rows.items()
                 if isinstance(v, dict) and isinstance(v.get("saved_at"), (int, float))
                 and now - float(v["saved_at"]) < TTL_SECONDS}
-        rows[key] = {"saved_at": now, "mode": mode, "text": text}
+        rows[key] = {"saved_at": now, "mode": mode, "text": text, "cwd": cwd}
         if len(rows) > MAX_ENTRIES:
             ordered = sorted(rows.items(), key=lambda item: float(item[1]["saved_at"]))
             rows = dict(ordered[-MAX_ENTRIES:])
@@ -52,4 +53,7 @@ class LastStore:
         saved = row.get("saved_at")
         if type(saved) not in (int, float) or time.time() - float(saved) >= TTL_SECONDS:
             return None
-        return {"text": row["text"], "mode": row.get("mode", "rich")}
+        cwd = row.get("cwd", ".")
+        if not isinstance(cwd, str):
+            return None
+        return {"text": row["text"], "mode": row.get("mode", "rich"), "cwd": cwd}

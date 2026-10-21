@@ -29,7 +29,7 @@ def callback(data, mid, user=101, chat=202, topic=None):
 
 class FakeAPI:
     def __init__(self):
-        self.sent, self.edits, self.acks, self.log = [], [], [], []
+        self.sent, self.edits, self.acks, self.actions, self.log = [], [], [], [], []
 
     def send_text(self, chat, text, thread=None, reply_markup=None, parse_mode=None):
         self.sent.append((chat, text, thread, reply_markup, parse_mode))
@@ -58,6 +58,9 @@ class FakeAPI:
 
     def answer_callback(self, query, text=""):
         self.acks.append((query, text))
+
+    def send_chat_action(self, chat, action="typing", thread=None):
+        self.actions.append((chat, action, thread))
 
 
 class BotTests(unittest.TestCase):
@@ -179,17 +182,21 @@ class BotTests(unittest.TestCase):
 
     def test_photo_download_prompt_and_cleanup(self):
         from sessions import scope
-        path = self.bot.settings.workspace / "synthetic.jpg"
+        selected = self.bot.settings.workspace / "selected"
+        selected.mkdir(mode=0o700)
+        path = selected / "synthetic.jpg"
         path.write_bytes(b"synthetic")
         runner = MagicMock()
         runner.run.return_value = AgentResult(True, "Synthetic answer")
         runner._cancelled.is_set.return_value = False
         task = Task("synthetic-task", 101, 202, None, scope(101, 202, None), runner,
-                    "gemini-test", 0, photo={"file_id": "synthetic"})
+                    "gemini-test", 0, photo={"file_id": "synthetic"},
+                    workspace=selected)
         self.bot._active = task
         with patch("bot.download_photo", return_value=path) as download:
             self.bot._execute(task, "Describe this", None)
-        download.assert_called_once()
+        self.assertEqual(download.call_args.args[2], selected)
+        self.assertTrue((selected / "artifacts").is_dir())
         self.assertIn(str(path), runner.run.call_args.args[0])
         self.assertFalse(path.exists())
         self.assertIsNone(self.bot._active)
@@ -304,20 +311,39 @@ class BotTests(unittest.TestCase):
         self.assertIn("Unknown command", self.api.sent[before][1])
         self.bot._save_last(key, "⚡ [AGY] · gemini-test\n\nanswer", "classic")
         before = len(self.api.sent)
-        self.bot.handle_update(update("/last"))
+        with patch.object(self.bot, "_send_output", return_value=True) as deliver:
+            self.bot.handle_update(update("/last"))
+        self.assertEqual(deliver.call_args.args[4], self.bot.settings.workspace)
+        self.bot._send_output(*deliver.call_args.args)
         self.assertEqual(self.api.sent[-1][1], "⚡ [AGY] · gemini-test\n\nanswer")
         self.assertEqual(len(self.api.sent), before + 1)
 
+    def test_last_uses_saved_reply_cwd_after_session_rebind(self):
+        from sessions import scope
+        key = scope(101, 202, 94)
+        original = self.bot.settings.workspace / "original"
+        current = self.bot.settings.workspace / "current"
+        original.mkdir(mode=0o700)
+        current.mkdir(mode=0o700)
+        self.bot._save_last(key, "saved answer", "raw", original)
+        self.bot.sessions.change(key, started=True, cwd="current")
+        with patch.object(self.bot, "_send_output", return_value=True) as deliver:
+            self.bot.handle_update(update("/last", topic=94))
+        self.assertEqual(deliver.call_args.args[4], original)
+
     def test_raw_body_still_extracts_safe_artifact_marker(self):
-        folder = self.bot.settings.workspace / "artifacts"
-        folder.mkdir(exist_ok=True)
+        selected = self.bot.settings.workspace / "selected-artifacts"
+        selected.mkdir(mode=0o700)
+        folder = selected / "artifacts"
+        folder.mkdir(mode=0o700)
         (folder / "raw.txt").write_text("synthetic", encoding="utf8")
         text = ('unformatted body\n'
                 'TAGW_MEDIA: {"path":"artifacts/raw.txt","kind":"document"}')
-        self.assertTrue(self.bot._send_output(202, text, 7, "raw"))
+        self.assertTrue(self.bot._send_output(202, text, 7, "raw", selected))
         _, delivered, thread, artifacts = self.api.classic_sent[-1]
         self.assertEqual((delivered, thread), ("unformatted body", 7))
         self.assertEqual([item.filename for item in artifacts], ["raw.txt"])
+        self.assertEqual(artifacts[0].path.parent, folder)
 
     def test_topic_model_scoping_and_restart(self):
         with patch("bot.list_models", return_value=[
@@ -589,6 +615,113 @@ class BotTests(unittest.TestCase):
             self.bot.handle_update(update("hello", topic=51))
             self.assertIn("/session start", self.api.sent[-1][1])
 
+    def test_session_start_selects_bounded_per_topic_cwd(self):
+        from sessions import scope
+        selected = self.bot.settings.workspace / "work" / "media_convert"
+        selected.mkdir(parents=True, mode=0o700)
+        self.bot.handle_update(update("/session start work/media_convert", topic=70))
+        row = self.bot.sessions.get(scope(101, 202, 70))
+        self.assertTrue(row["started"])
+        self.assertEqual(row["cwd"], "work/media_convert")
+        self.assertIn("CWD: " + str(selected), self.api.sent[-1][1])
+        self.bot.handle_update(update("/status", topic=70))
+        self.assertIn("CWD: " + str(selected), self.api.sent[-1][1])
+        with patch("bot.subprocess.run") as run:
+            run.return_value.returncode = 0
+            run.return_value.stdout = "selected listing"
+            self.bot.handle_update(update("/ls", topic=70))
+        self.assertEqual(run.call_args.args[0], ["ls", "-l", "--", str(selected)])
+        self.assertEqual(run.call_args.kwargs["cwd"], str(selected))
+        with patch("bot.AgyRunner") as runner, patch("bot.threading.Thread") as worker:
+            self.bot.sessions.change(scope(101, 202, 70), model="example-high")
+            self.bot.handle_update(update("hello", topic=70))
+        self.assertEqual(runner.call_args.args[1], selected)
+        self.assertEqual(self.bot._active.workspace, selected)
+        worker.return_value.start.assert_called_once()
+        self.bot._active = None
+
+    def test_session_start_rejects_unsafe_cwd_with_safe_reason(self):
+        from sessions import scope
+        outside = (self.bot.settings.workspace.parent /
+                   (self.bot.settings.workspace.name + "-outside"))
+        outside.mkdir(mode=0o700)
+        self.addCleanup(__import__("shutil").rmtree, outside, True)
+        link = self.bot.settings.workspace / "alias"
+        link.symlink_to(outside)
+        cases = [
+            ("missing", "does not exist"),
+            ("../outside", "parent-directory traversal"),
+            (str(outside), "inside the configured workspace"),
+            ("alias", "symbolic links"),
+            ("bad\npath", "empty or invalid"),
+        ]
+        for topic, (value, reason) in enumerate(cases, 80):
+            self.bot.handle_update(update("/session start " + value, topic=topic))
+            reply = self.api.sent[-1][1]
+            self.assertIn(reason, reply)
+            self.assertIn("re-enter /session start [CWD]", reply)
+            self.assertFalse(self.bot.sessions.get(scope(101, 202, topic)).get("started", False))
+
+        unsafe = self.bot.settings.workspace / "unsafe"
+        unsafe.mkdir(mode=0o700)
+        unsafe.chmod(0o722)
+        self.bot.handle_update(update("/session start unsafe", topic=90))
+        self.assertIn("unsafe group or public write permission", self.api.sent[-1][1])
+        self.assertFalse(self.bot.sessions.get(scope(101, 202, 90)).get("started", False))
+
+    def test_active_session_can_rebind_cwd_and_resets_conversation(self):
+        from sessions import scope
+        key = scope(101, 202, 91)
+        old = self.bot.settings.workspace / "old"
+        new = self.bot.settings.workspace / "new"
+        old.mkdir(mode=0o700)
+        new.mkdir(mode=0o700)
+        self.bot.sessions.change(key, started=True, cwd="old", model="example-high",
+                                 conversation_id="old-conversation",
+                                 display_mode="classic")
+        old.rmdir()
+        self.bot.handle_update(update("hello", topic=91))
+        self.assertIn("CWD unavailable", self.api.sent[-1][1])
+        self.bot.handle_update(update("/session start new", topic=91))
+        row = self.bot.sessions.get(key)
+        self.assertEqual(row["cwd"], "new")
+        self.assertTrue(row["started"])
+        self.assertEqual(row["model"], "example-high")
+        self.assertEqual(row["display_mode"], "classic")
+        self.assertNotIn("conversation_id", row)
+        self.assertIn("new AGY conversation", self.api.sent[-1][1])
+
+    def test_running_topic_cannot_rebind_cwd_or_change_session(self):
+        from sessions import scope
+        key = scope(101, 202, 93)
+        old = self.bot.settings.workspace / "old-running"
+        new = self.bot.settings.workspace / "new-running"
+        old.mkdir(mode=0o700)
+        new.mkdir(mode=0o700)
+        self.bot.sessions.change(key, started=True, cwd="old-running",
+                                 model="example-high",
+                                 conversation_id="active-conversation")
+        before = self.bot.sessions.get(key)
+        self.bot._active = Task("synthetic-task", 101, 202, 93, key, MagicMock(),
+                                "example-high", 1.0, workspace=old)
+        with patch.object(self.bot.bridge, "install") as install:
+            self.bot.handle_update(update("/session start new-running", topic=93))
+        self.assertEqual(self.bot.sessions.get(key), before)
+        self.assertIn("Stop the running task first", self.api.sent[-1][1])
+        install.assert_not_called()
+        self.bot._active = None
+
+    def test_invalid_saved_cwd_is_reported_without_crashing(self):
+        from sessions import scope
+        key = scope(101, 202, 92)
+        self.bot.sessions.change(key, started=True, cwd=["invalid"], model="example-high")
+        self.bot.handle_update(update("/status", topic=92))
+        self.assertIn("CWD: unavailable", self.api.sent[-1][1])
+        with patch("bot.AgyRunner") as runner:
+            self.bot.handle_update(update("hello", topic=92))
+        runner.assert_not_called()
+        self.assertIn("Saved CWD state is invalid", self.api.sent[-1][1])
+
     def test_session_start_storage_failure_is_closed(self):
         with patch.object(self.bot.sessions, "change", side_effect=OSError):
             self.bot.handle_update(update("/session start", topic=55))
@@ -683,6 +816,7 @@ class BotTests(unittest.TestCase):
         done = MagicMock()
         done.wait.side_effect = [False, True]
         self.bot._timer(task, done)
+        self.assertFalse(self.api.actions)
         chat, mid, text, markup, mode = self.api.edits[-1]
         self.assertEqual((chat, mid, mode), (202, 5, "HTML"))
         self.assertIn("等待回覆", text)
@@ -690,8 +824,40 @@ class BotTests(unittest.TestCase):
         task.delivering = True
         done.wait.side_effect = [False, True]
         count = len(self.api.edits)
+        action_count = len(self.api.actions)
         self.bot._timer(task, done)
         self.assertEqual(len(self.api.edits), count)
+        self.assertEqual(len(self.api.actions), action_count)
+
+        task.delivering = False
+        self.bot._pending = None
+        done.wait.side_effect = [False, True]
+        self.bot._timer(task, done)
+        self.assertEqual(self.api.actions[-1], (202, "typing", 7))
+
+    def test_typing_failure_does_not_fail_active_task(self):
+        from telegram_api import TelegramError
+        from sessions import scope
+        task = Task("typing-key", 101, 202, 9, scope(101, 202, 9), MagicMock(),
+                    "gemini-test", __import__("time").monotonic())
+        self.bot._active = task
+        with patch.object(self.api, "send_chat_action",
+                          side_effect=TelegramError("synthetic", kind="transport")):
+            self.bot._typing(task)
+        self.assertIs(self.bot._active, task)
+        records = self.bot.events.path.read_text(encoding="utf8")
+        self.assertIn('"event":"chat_action_failed"', records)
+        self.assertNotIn("synthetic", records)
+
+    def test_typing_is_suppressed_while_task_ask_is_pending(self):
+        from bot import Pending
+        from sessions import scope
+        task = Task("typing-key", 101, 202, 9, scope(101, 202, 9), MagicMock(),
+                    "example-high", 1.0)
+        self.bot._active = task
+        self.bot._pending = Pending({"task": task.key}, 1)
+        self.bot._typing(task)
+        self.assertFalse(self.api.actions)
 
     def test_emitted_stop_callback_keeps_owner_chat_message_task_checks(self):
         from presentation import progress_message

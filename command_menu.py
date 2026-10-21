@@ -6,7 +6,7 @@ BOT_COMMANDS: tuple[tuple[str, str], ...] = (
     ("start", "Show available commands"),
     ("help", "Show available commands"),
     ("myid", "Show this user, chat and topic ID"),
-    ("session", "Activate this chat or topic: /session start"),
+    ("session", "Activate: /session start [CWD]"),
     ("new", "Start a new AGY conversation for this topic"),
     ("model", "Choose an explicit AGY model"),
     ("format", "Choose rich, classic or raw replies"),
