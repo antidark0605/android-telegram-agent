@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import sys
 import time
 import uuid
@@ -23,11 +24,41 @@ class AskBridge:
 
     def install(self, workspace: Path) -> None:
         """Merge one scoped MCP server into the workspace, never global settings."""
-        config = workspace / ".agents" / "mcp_config.json"
+        agents = workspace / ".agents"
+        if agents.is_symlink():
+            raise ValueError("Workspace .agents directory cannot be a symbolic link.")
+        agents.mkdir(mode=0o700, exist_ok=True)
+        info = agents.stat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_mode & (stat.S_IRWXG | stat.S_IRWXO)
+                or not agents.resolve().is_relative_to(workspace.resolve())):
+            raise ValueError("Workspace .agents directory must be private and owned by this user.")
+        config = agents / "mcp_config.json"
+        if config.is_symlink():
+            raise ValueError("Workspace MCP configuration cannot be a symbolic link.")
         try:
-            current = json.loads(config.read_text(encoding="utf8"))
+            flags = os.O_RDONLY
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            fd = os.open(config, flags)
         except FileNotFoundError:
             current = {}
+        else:
+            try:
+                config_info = os.fstat(fd)
+                if (not stat.S_ISREG(config_info.st_mode)
+                        or config_info.st_uid != os.getuid()
+                        or config_info.st_mode & (stat.S_IRWXG | stat.S_IRWXO)):
+                    raise ValueError("Workspace MCP configuration must be a private file.")
+                with os.fdopen(fd, "r", encoding="utf8") as stream:
+                    fd = -1
+                    raw = stream.read(1_000_001)
+                if len(raw) > 1_000_000:
+                    raise ValueError("Workspace MCP configuration is too large.")
+                current = json.loads(raw)
+            finally:
+                if fd >= 0:
+                    os.close(fd)
         if not isinstance(current, dict):
             raise ValueError("Invalid workspace MCP configuration.")
         servers = current.setdefault("mcpServers", {})
@@ -38,6 +69,8 @@ class AskBridge:
         if "telegram-ask" in servers and servers["telegram-ask"] != entry:
             raise ValueError("Workspace has a conflicting telegram-ask MCP server.")
         servers["telegram-ask"] = entry
+        if agents.is_symlink() or config.is_symlink():
+            raise ValueError("Workspace MCP path changed during installation.")
         write_private(config, current)
 
     def begin(self, task_key: str, user: int, chat: int, topic: int | None) -> None:

@@ -26,6 +26,16 @@ class SessionTests(unittest.TestCase):
             self.assertEqual(s.get(two)["conversation_id"], "conv-second")
             self.assertNotIn("conversation_id", s.get(one))
             self.assertEqual(s.get(one)["display_mode"], "classic")
+            self.assertEqual(s.get(one)["cwd"], ".")
+
+    def test_reset_preserves_selected_cwd(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = SessionStore(Path(td) / "sessions.json")
+            key = scope(1, 2, 3)
+            store.change(key, cwd="projects/demo", conversation_id="conversation")
+            store.reset(key)
+            self.assertEqual(store.get(key)["cwd"], "projects/demo")
+            self.assertNotIn("conversation_id", store.get(key))
 
 
     def test_transactional_session_state(self):
@@ -71,12 +81,38 @@ class BridgeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             workspace = root / "workspace"
-            (workspace / ".agents").mkdir(parents=True)
+            (workspace / ".agents").mkdir(parents=True, mode=0o700)
+            (workspace / ".agents").chmod(0o700)
             config = workspace / ".agents" / "mcp_config.json"
             config.write_text(json.dumps({"mcpServers": {"telegram-ask": {
                 "command": "/different"}}}), encoding="utf8")
+            config.chmod(0o600)
             with self.assertRaises(ValueError):
                 AskBridge(root / "ask").install(workspace)
+
+    def test_install_rejects_symlinked_agents_and_config(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            workspace = root / "workspace"
+            workspace.mkdir(mode=0o700)
+            outside = root / "outside"
+            outside.mkdir(mode=0o700)
+            agents = workspace / ".agents"
+            agents.symlink_to(outside, target_is_directory=True)
+            bridge = AskBridge(root / "ask")
+            with self.assertRaises(ValueError):
+                bridge.install(workspace)
+            self.assertFalse((outside / "mcp_config.json").exists())
+
+            agents.unlink()
+            agents.mkdir(mode=0o700)
+            target = outside / "private.json"
+            target.write_text("{}", encoding="utf8")
+            target.chmod(0o600)
+            (agents / "mcp_config.json").symlink_to(target)
+            with self.assertRaises(ValueError):
+                bridge.install(workspace)
+            self.assertEqual(target.read_text(encoding="utf8"), "{}")
 
     def test_mcp_question_answer_roundtrip(self):
         with tempfile.TemporaryDirectory() as td:

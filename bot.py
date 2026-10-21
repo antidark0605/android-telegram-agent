@@ -27,6 +27,7 @@ from presentation import (DISPLAY_LABELS, DISPLAY_MODES, display_keyboard,
                           normalize_display_mode, progress_message,
                           render_response, usage_plain)
 from usage_footer import QuotaService
+from workspace_policy import WorkspaceError, resolve_workspace
 from vendor.telegram_ui.service_lifecycle import (ServiceLifecycleView,
                                                    render_service_lifecycle)
 from rich_delivery import _html_fallback
@@ -51,6 +52,7 @@ class Task:
     delivering: bool = False
     photo: dict | None = None
     display_mode: str = "rich"
+    workspace: Path | None = None
 
 
 @dataclass
@@ -156,12 +158,14 @@ class TelegramAgyBot:
             return None
 
     def _send_output(self, chat: int, text: str, thread: int | None = None,
-                     mode: str = "rich") -> bool:
+                     mode: str = "rich", workspace: Path | None = None) -> bool:
         """Post one already-rendered answer using its explicit display mode."""
         from artifacts import extract_artifacts
-        cleaned, media = extract_artifacts(text, self.settings.workspace)
         self.events.log("send_attempt", stage="send_message")
         try:
+            workspace = resolve_workspace(
+                self.settings.workspace, str(workspace or self.settings.workspace))[0]
+            cleaned, media = extract_artifacts(text, workspace)
             mode = normalize_display_mode(mode)
             if mode == "rich" and hasattr(self.api, "send_rich"):
                 message_id = self.api.send_rich(chat, cleaned, thread, artifacts=media)
@@ -224,9 +228,12 @@ class TelegramAgyBot:
                 self.events.log("lifecycle_failed", kind="unconfirmed",
                                 stage="startup_notice")
 
-    def _save_last(self, key: str, text: str, mode: str) -> None:
+    def _save_last(self, key: str, text: str, mode: str,
+                   workspace: Path | None = None) -> None:
         try:
-            self.last.save(key, text, normalize_display_mode(mode))
+            _path, relative = resolve_workspace(
+                self.settings.workspace, str(workspace or self.settings.workspace))
+            self.last.save(key, text, normalize_display_mode(mode), relative)
         except (OSError, ValueError, TypeError):
             self.events.log("last_response_failed", kind="storage", stage="last_save")
 
@@ -255,6 +262,21 @@ class TelegramAgyBot:
         if payload is not None and task.message_id is not None:
             self._edit(task.chat, task.message_id, payload[0], payload[1],
                        parse_mode="HTML")
+
+    def _typing(self, task: Task) -> None:
+        """Refresh Telegram's short-lived typing action without affecting a task."""
+        with self._lock:
+            waiting = (self._pending is not None and
+                       self._pending.question.get("task") == task.key)
+            if self._active is not task or task.delivering or waiting:
+                return
+        try:
+            self.api.send_chat_action(task.chat, "typing", task.thread)
+        except (TelegramError, AttributeError):
+            self.events.log("chat_action_failed", stage="send_chat_action")
+
+    def _workspace(self, row: dict) -> Path:
+        return resolve_workspace(self.settings.workspace, row.get("cwd"))[0]
 
     def _ack(self, query_id: str, text: str = "") -> None:
         try:
@@ -330,7 +352,7 @@ class TelegramAgyBot:
         if cmd in ("/start", "/help"):
             self._send(chat_id, "AGY Telegram Agent\n"
                        "Text: continue an activated topic conversation\n"
-                       "/session start: activate this chat/topic\n"
+                       "/session start [CWD]: activate this chat/topic\n"
                        "/myid: show your user/chat/topic IDs\n"
                        "/new: start new conversation in this topic\n"
                        "/model: choose an explicit model\n"
@@ -344,26 +366,69 @@ class TelegramAgyBot:
             row = self.sessions.get(key)
             text_out = (status_text("⏳ Running", active.started, active.model)
                         if active and active.session_key == key else "Idle")
+            try:
+                cwd = self._workspace(row)
+                cwd_text = str(cwd)
+            except WorkspaceError:
+                cwd_text = "unavailable; re-enter /session start [CWD]"
             self._send(chat_id, f"{text_out}\nSelected model: {row.get('model') or 'not selected'}"
                        f"\nLast reported model: {row.get('last_actual_model') or 'not reported by AGY'}"
-                       f"\nCWD: {self.settings.workspace}"
+                       f"\nCWD: {cwd_text}"
                        f"\nNative session ID: {row.get('conversation_id') or 'pending (created on first task)'}"
                        f"\nDisplay: {normalize_display_mode(row.get('display_mode'))}"
                        f"\nYOLO: {'enabled' if self.settings.yolo else 'disabled'}", thread)
         elif cmd == "/session":
-            if arg.strip().lower() != "start":
-                self._send(chat_id, "Use /session start in the intended chat/topic. CWD stays configured.", thread)
+            fields = arg.strip().split(maxsplit=1)
+            if not fields or fields[0].lower() != "start":
+                self._send(chat_id, "Use /session start [CWD] in the intended chat/topic.", thread)
             else:
                 row = self.sessions.get(key)
-                if row.get("started") is True or row.get("conversation_id"):
+                requested = fields[1] if len(fields) == 2 else None
+                active_session = (row.get("started") is True
+                                  or bool(row.get("conversation_id")))
+                if active and active.session_key == key:
+                    self._send(chat_id, "Stop the running task first.", thread)
+                elif active_session and requested is None:
                     self._send(chat_id, "This chat/topic already has an active session.", thread)
                 else:
                     try:
-                        self.sessions.change(key, started=True)
-                    except (OSError, ValueError):
+                        cwd, relative = resolve_workspace(
+                            self.settings.workspace, requested)
+                        self.bridge.install(cwd)
+                    except WorkspaceError as exc:
+                        self._send(chat_id, f"CWD rejected: {exc} Fix it, then re-enter "
+                                   "/session start [CWD].", thread)
+                    except PermissionError:
+                        self._send(chat_id, "CWD rejected: the Bot cannot create its private "
+                                   "workspace files there. Fix permissions, then re-enter "
+                                   "/session start [CWD].", thread)
+                    except ValueError:
+                        self._send(chat_id, "CWD rejected: its private agent configuration "
+                                   "is unsafe or conflicts with this Bot. Fix it, then re-enter "
+                                   "/session start [CWD].", thread)
+                    except OSError:
                         self._send(chat_id, "Session activation could not be saved.", thread)
                     else:
-                        self._send(chat_id, "Session activated for this chat/topic. Choose /model, then send a task.", thread)
+                        try:
+                            if active_session and row.get("cwd", ".") != relative:
+                                self.sessions.reset(key, cwd=relative)
+                                changed = True
+                            elif active_session:
+                                changed = False
+                            else:
+                                self.sessions.change(key, started=True, cwd=relative)
+                                changed = True
+                        except (OSError, ValueError):
+                            self._send(chat_id, "Session activation could not be saved.", thread)
+                        else:
+                            if active_session and not changed:
+                                self._send(chat_id, "This chat/topic already uses that CWD.", thread)
+                            elif active_session:
+                                self._send(chat_id, f"CWD updated for this chat/topic.\nCWD: {cwd}\n"
+                                           "The next task starts a new AGY conversation.", thread)
+                            else:
+                                self._send(chat_id, f"Session activated for this chat/topic.\n"
+                                           f"CWD: {cwd}\nChoose /model, then send a task.", thread)
         elif cmd == "/new":
             if active and active.session_key == key:
                 self._send(chat_id, "Stop the running task first.", thread)
@@ -375,7 +440,8 @@ class TelegramAgyBot:
                                     stage="session_write")
                     self._send(chat_id, "Session reset could not be saved.", thread)
                 else:
-                    self._send(chat_id, "New AGY conversation for this topic. Model preserved.", thread)
+                    self._send(chat_id, "New AGY conversation for this topic. CWD, model and "
+                               "display mode preserved.", thread)
         elif cmd == "/model":
             if arg.strip():
                 self._send(chat_id, "Use /model and choose an explicit model.", thread)
@@ -389,7 +455,13 @@ class TelegramAgyBot:
             if arg.strip():
                 self._send(chat_id, "Use /ls without arguments: lists this workspace only.", thread)
             else:
-                self._list_workspace(chat_id, thread)
+                try:
+                    cwd = self._workspace(self.sessions.get(key))
+                except WorkspaceError as exc:
+                    self._send(chat_id, f"CWD unavailable: {exc} Re-enter "
+                               "/session start [CWD].", thread)
+                else:
+                    self._list_workspace(chat_id, thread, cwd)
         elif cmd == "/context":
             row = self.sessions.get(key)
             usage = row.get("last_usage", {})
@@ -417,11 +489,11 @@ class TelegramAgyBot:
         else:
             self._start_task(text, user, chat_id, thread, key, photo=incoming)
 
-    def _list_workspace(self, chat: int, thread: int | None) -> None:
+    def _list_workspace(self, chat: int, thread: int | None, workspace: Path) -> None:
         try:
             result = subprocess.run(
-                ["ls", "-l", "--", str(self.settings.workspace)],
-                cwd=str(self.settings.workspace), stdin=subprocess.DEVNULL,
+                ["ls", "-l", "--", str(workspace)],
+                cwd=str(workspace), stdin=subprocess.DEVNULL,
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
                 timeout=5, check=False)
             if result.returncode != 0:
@@ -448,7 +520,12 @@ class TelegramAgyBot:
         if busy:
             self._send(chat, "Model selection is unavailable during an active task.", thread)
             return
-        options = list_models(self.settings.agy_command, self.settings.workspace)
+        try:
+            workspace = self._workspace(self.sessions.get(key))
+        except WorkspaceError as exc:
+            self._send(chat, f"CWD unavailable: {exc} Re-enter /session start [CWD].", thread)
+            return
+        options = list_models(self.settings.agy_command, workspace)
         if not options:
             self._send(chat, "AGY models unavailable; check 'agy models' in Termux.", thread)
             return
@@ -496,7 +573,12 @@ class TelegramAgyBot:
         if row is None:
             self._send(chat, "No saved reply for this chat/topic.", thread)
             return
-        self._send_output(chat, row["text"], thread, row.get("mode", "rich"))
+        try:
+            workspace = resolve_workspace(self.settings.workspace, row.get("cwd"))[0]
+        except WorkspaceError as exc:
+            self._send(chat, f"Saved reply CWD unavailable: {exc}", thread)
+            return
+        self._send_output(chat, row["text"], thread, row.get("mode", "rich"), workspace)
 
     def _start_task(self, prompt: str, user: int, chat: int,
                     thread: int | None, key: str, photo: dict | None = None) -> None:
@@ -512,13 +594,19 @@ class TelegramAgyBot:
                 if not row.get("model"):
                     self._send(chat, "Choose a model with /model before starting a task.", thread)
                     return
-                runner = AgyRunner(self.settings.agy_command, self.settings.workspace,
+                try:
+                    workspace = self._workspace(row)
+                except WorkspaceError as exc:
+                    self._send(chat, f"CWD unavailable: {exc} Re-enter "
+                               "/session start [CWD].", thread)
+                    return
+                runner = AgyRunner(self.settings.agy_command, workspace,
                                    self.settings.task_timeout_seconds,
                                    self.settings.print_timeout)
                 display_mode = normalize_display_mode(row.get("display_mode"))
                 task = Task(secrets.token_hex(8), user, chat, thread, key, runner,
                             row.get("model"), time.monotonic(), photo=photo,
-                            display_mode=display_mode)
+                            display_mode=display_mode, workspace=workspace)
                 self._active = task
                 self.events.log("task_started", stage="agy")
                 self._worker = threading.Thread(
@@ -530,13 +618,20 @@ class TelegramAgyBot:
             self._send(chat, "AGY is busy. Use Stop on the running task.", thread)
 
     def _timer(self, task: Task, done: threading.Event) -> None:
-        while not done.wait(5):
+        with self._lock:
+            waiting = (self._pending is not None and
+                       self._pending.question.get("task") == task.key)
+        if not waiting:
+            self._typing(task)
+        while not done.wait(4):
             with self._lock:
                 if self._active is not task or task.delivering:
                     return
                 waiting = (self._pending is not None and
                            self._pending.question.get("task") == task.key)
             self._edit_status(task, "waiting" if waiting else "running")
+            if not waiting:
+                self._typing(task)
 
     def _execute(self, task: Task, prompt: str, cid: str | None) -> None:
         done = threading.Event()
@@ -544,17 +639,19 @@ class TelegramAgyBot:
         ok = False
         result_text = "Task failed unexpectedly."
         incoming_path = None
+        workspace = task.workspace or self.settings.workspace
         try:
+            workspace = resolve_workspace(self.settings.workspace, str(workspace))[0]
             payload = self._progress(task, "running")
             mid = (self._send(task.chat, payload[0], task.thread, payload[1],
                               parse_mode="HTML") if payload else None)
             with self._lock:
                 task.message_id = mid
-            if mid is not None:
-                ticker = threading.Thread(target=self._timer, args=(task, done),
-                                          daemon=True, name="task-timer")
-                ticker.start()
-            folder = self.settings.workspace / "artifacts"
+            ticker = threading.Thread(target=self._timer, args=(task, done),
+                                      daemon=True, name="task-timer")
+            ticker.start()
+            self.bridge.install(workspace)
+            folder = workspace / "artifacts"
             if folder.is_symlink():
                 raise ValueError("Artifact directory cannot be a symlink")
             folder.mkdir(mode=0o700, exist_ok=True)
@@ -563,11 +660,11 @@ class TelegramAgyBot:
             if task.photo is not None:
                 if task.photo.get("kind") in (None, "photo"):
                     incoming_path = download_photo(
-                        self.api, task.photo, self.settings.workspace,
+                        self.api, task.photo, workspace,
                         cancelled=task.runner._cancelled)
                 else:
                     incoming_path = download_media(
-                        self.api, task.photo, self.settings.workspace,
+                        self.api, task.photo, workspace,
                         cancelled=task.runner._cancelled)
                 prompt += ("\n\n使用者附件已下載到本機：" + str(incoming_path)
                            + "\n請使用圖片或檔案查看工具讀取此附件，不要僅依檔名猜測。"
@@ -581,6 +678,7 @@ class TelegramAgyBot:
                         "line in your final response, without punctuation after it:\n"
                         'TAGW_MEDIA: {"path":"artifacts/example.pdf","kind":"auto"}\n'
                         "Never declare private files outside artifacts/.")
+            workspace = resolve_workspace(self.settings.workspace, str(workspace))[0]
             outcome = task.runner.run(prompt + ask_hint, model=task.model,
                                       conversation_id=cid, yolo=self.settings.yolo)
             ok, result_text = outcome.ok, outcome.message
@@ -628,9 +726,9 @@ class TelegramAgyBot:
                 rendered = render_response(result_text, task.model, data, cached,
                                            task.display_mode)
             self._save_last(task.session_key, rendered if ok else result_text,
-                            task.display_mode if ok else "raw")
+                            task.display_mode if ok else "raw", workspace)
             delivered = (self._send_output(task.chat, rendered, task.thread,
-                                           task.display_mode) if ok else True)
+                                           task.display_mode, workspace) if ok else True)
             if not ok:
                 self._send(task.chat, "Task failed: " + result_text, task.thread)
             # Completed only after Telegram acknowledged the answer; terminal

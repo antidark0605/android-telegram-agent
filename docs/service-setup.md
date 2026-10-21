@@ -53,6 +53,9 @@ scripts/rollback-termux.sh \
 
 回滾先 compile 上一版並以該版程式驗證目前 config，再切換 `current`／`previous`。
 它不回復或覆蓋私人 session state；若 config schema 曾不相容，驗證失敗會在切換前停止。
+若回滾目標不支援 per-Topic CWD，切換後、重啟服務前須刪除私人 config 目錄內的
+`last.json`；重啟後，曾使用子目錄 CWD 的每個 Topic 必須先輸入 `/new` 再執行任務。
+舊版會忽略已保存的 `cwd`，也可能讓 `/last` 從 workspace 根目錄選到同名附件。
 
 ## Doctor
 

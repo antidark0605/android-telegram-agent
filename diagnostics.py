@@ -20,6 +20,7 @@ EVENTS = frozenset({
     "task_stop_requested", "handler_failed", "quota_failed",
     "session_failed", "photo_cleanup_failed",
     "command_menu_ok", "command_menu_failed",
+    "chat_action_failed",
 })
 KINDS = frozenset({
     "http", "transport", "protocol", "api", "storage", "unknown",
@@ -30,7 +31,7 @@ STAGES = frozenset({
     "startup", "get_updates", "process_update", "offset_write",
     "send_message", "edit_message", "answer_callback", "agy",
     "quota", "shutdown", "session_write", "cleanup",
-    "command_menu",
+    "command_menu", "send_chat_action",
 })
 
 

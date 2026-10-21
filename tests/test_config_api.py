@@ -166,6 +166,22 @@ class MessageTests(unittest.TestCase):
         self.assertEqual(call.call_args.args[1]["reply_markup"],
                          {"inline_keyboard": []})
 
+    def test_typing_action_is_scoped_to_topic_and_confirmed(self):
+        api = TelegramAPI("dummy-token")
+        with patch.object(api, "_call", return_value=True) as call:
+            api.send_chat_action(1, "typing", 7)
+        self.assertEqual(call.call_args.args,
+                         ("sendChatAction", {"chat_id": 1, "action": "typing",
+                                             "message_thread_id": 7}))
+        with patch.object(api, "_call", return_value=False):
+            with self.assertRaises(TelegramError) as caught:
+                api.send_chat_action(1)
+        self.assertEqual(caught.exception.kind, "protocol")
+        with patch.object(api, "_call") as call:
+            with self.assertRaises(TelegramError):
+                api.send_chat_action(1, "upload_document")
+        call.assert_not_called()
+
     def test_empty_message(self):
         self.assertEqual(split_text(""), ["(empty response)"])
 
