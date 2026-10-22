@@ -546,6 +546,8 @@ class BotTests(unittest.TestCase):
             runner.return_value.run.assert_called_once()
 
     def test_ls_fixed_argv_and_authorization(self):
+        nested = self.bot.settings.workspace / "artifacts"
+        nested.mkdir(mode=0o700)
         with patch("bot.subprocess.run") as run:
             run.return_value.returncode = 0
             run.return_value.stdout = "total 4\n-rw------- 1 owner owner 3 sample.txt\n"
@@ -555,9 +557,56 @@ class BotTests(unittest.TestCase):
             self.assertEqual(run.call_args.args[0], ["ls", "-l", "--", str(self.bot.settings.workspace)])
             self.assertNotIn("shell", run.call_args.kwargs)
             self.assertEqual(self.api.sent[-1][2], 7)
+            self.assertTrue(self.api.sent[-1][1].startswith(
+                "Path: " + str(self.bot.settings.workspace) + "\n"))
             self.assertIn("sample.txt", self.api.sent[-1][1])
-            self.bot.handle_update(update("/ls ; dangerous"))
-            self.assertEqual(run.call_count, 1)
+            self.bot.handle_update(update("/ls artifacts"))
+            self.assertEqual(run.call_args.args[0], ["ls", "-l", "--", str(nested)])
+            self.assertEqual(run.call_args.kwargs["cwd"], str(nested))
+            self.assertTrue(self.api.sent[-1][1].startswith("Path: " + str(nested) + "\n"))
+            self.bot.handle_update(update('/ls "artifacts"'))
+            self.assertEqual(run.call_args.args[0], ["ls", "-l", "--", str(nested)])
+            self.assertEqual(run.call_count, 3)
+
+    def test_ls_rejects_paths_outside_topic_cwd_before_subprocess(self):
+        from sessions import scope
+        selected = self.bot.settings.workspace / "work"
+        selected.mkdir(mode=0o700)
+        inside = selected / "output"
+        inside.mkdir(mode=0o700)
+        sibling = self.bot.settings.workspace / "sibling"
+        sibling.mkdir(mode=0o700)
+        file_target = selected / "result.txt"
+        file_target.write_text("synthetic", encoding="utf8")
+        alias = selected / "alias"
+        alias.symlink_to(inside, target_is_directory=True)
+        self.bot.sessions.change(scope(101, 202, 71), started=True, cwd="work")
+
+        rejected = (
+            ("/ls ..", "parent-directory traversal"),
+            ("/ls ../sibling", "parent-directory traversal"),
+            ("/ls " + str(sibling), "current Topic CWD"),
+            ("/ls missing", "does not exist"),
+            ("/ls result.txt", "not a directory"),
+            ("/ls alias", "symbolic links"),
+        )
+        with patch("bot.subprocess.run") as run:
+            for command, reason in rejected:
+                self.bot.handle_update(update(command, topic=71))
+                self.assertIn("Path rejected", self.api.sent[-1][1])
+                self.assertIn(reason, self.api.sent[-1][1])
+                self.assertIn("Re-enter /ls [PATH]", self.api.sent[-1][1])
+            run.assert_not_called()
+
+    def test_ls_rejects_unsafe_child_permissions(self):
+        unsafe = self.bot.settings.workspace / "unsafe-listing"
+        unsafe.mkdir(mode=0o700)
+        unsafe.chmod(0o722)
+        self.addCleanup(unsafe.chmod, 0o700)
+        with patch("bot.subprocess.run") as run:
+            self.bot.handle_update(update("/ls unsafe-listing"))
+        run.assert_not_called()
+        self.assertIn("unsafe group or public write permission", self.api.sent[-1][1])
 
     def test_ls_timeout_failure_and_output_bound(self):
         import subprocess
@@ -572,7 +621,7 @@ class BotTests(unittest.TestCase):
             run.return_value.stdout = "x" * 15000
             self.bot.handle_update(update("/ls"))
             self.assertIn("truncated", self.api.sent[-1][1])
-            self.assertLess(len(self.api.sent[-1][1]), 12100)
+            self.assertLessEqual(len(self.api.sent[-1][1]), 12000)
 
     def test_status_native_id_cwd_and_model(self):
         from sessions import scope
@@ -632,6 +681,7 @@ class BotTests(unittest.TestCase):
             self.bot.handle_update(update("/ls", topic=70))
         self.assertEqual(run.call_args.args[0], ["ls", "-l", "--", str(selected)])
         self.assertEqual(run.call_args.kwargs["cwd"], str(selected))
+        self.assertIn("Path: " + str(selected), self.api.sent[-1][1])
         with patch("bot.AgyRunner") as runner, patch("bot.threading.Thread") as worker:
             self.bot.sessions.change(scope(101, 202, 70), model="example-high")
             self.bot.handle_update(update("hello", topic=70))

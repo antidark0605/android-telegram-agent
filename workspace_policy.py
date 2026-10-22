@@ -70,3 +70,23 @@ def resolve_workspace(root: Path, requested: str | None = None) -> tuple[Path, s
         if not os.access(current, os.R_OK | os.W_OK | os.X_OK):
             raise WorkspaceError("The Bot lacks read, write or search permission for this CWD.")
     return resolved, "." if not relative.parts else relative.as_posix()
+
+
+def resolve_list_directory(root: Path, workspace: Path,
+                           requested: str | None = None) -> Path:
+    """Resolve an ``/ls`` target inside the current Topic workspace.
+
+    The current workspace and target both pass the normal ownership, mode and
+    symlink checks. Relative targets start at the current Topic CWD; absolute
+    targets are accepted only when they remain below that same CWD.
+    """
+    current, _relative = resolve_workspace(root, str(workspace))
+    value = (requested or ".").strip()
+    if (len(value) >= 2 and value[0] == value[-1]
+            and value[0] in {"'", '"'}):
+        value = value[1:-1].strip()
+    candidate = Path(value) if Path(value).is_absolute() else current / value
+    target, _relative = resolve_workspace(root, str(candidate))
+    if not target.is_relative_to(current):
+        raise WorkspaceError("Path must stay inside the current Topic CWD.")
+    return target
