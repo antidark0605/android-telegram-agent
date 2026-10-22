@@ -176,52 +176,61 @@ class BridgeTests(unittest.TestCase):
     def test_mcp_question_answer_roundtrip(self):
         with tempfile.TemporaryDirectory() as td:
             bridge = AskBridge(Path(td) / "ask")
-            bridge.begin("task-1", 101, 202, 303)
+            task_key = "1" * 16
+            bridge.begin(task_key, 101, 202, 303)
             result = []
             def ask_thread():
                 result.append(_ask(bridge.directory, {
                     "question": "Pick one",
                     "choices": [{"label": "A", "description": "First choice", "value": "first"}]}))
-            t = threading.Thread(target=ask_thread)
-            t.start()
-            question = None
-            for _ in range(30):
-                question = bridge.next_question("task-1")
-                if question:
-                    break
-                time.sleep(0.05)
-            self.assertIsNotNone(question)
-            self.assertEqual(question["topic"], 303)
-            bridge.answer(question, "first")
-            t.join(timeout=2)
+            with patch.dict(__import__("os").environ,
+                            {"ANDROID_TELEGRAM_AGENT_TASK_KEY": task_key}):
+                t = threading.Thread(target=ask_thread)
+                t.start()
+                question = None
+                for _ in range(30):
+                    question = bridge.next_question(task_key)
+                    if question:
+                        break
+                    time.sleep(0.05)
+                self.assertIsNotNone(question)
+                self.assertEqual(question["topic"], 303)
+                bridge.answer(question, "first")
+                t.join(timeout=2)
             self.assertEqual(result, ["first"])
-            bridge.end("task-1")
-            self.assertFalse(bridge.active.exists())
+            bridge.end(task_key)
+            self.assertFalse((bridge.active / (task_key + ".json")).exists())
 
     def test_mcp_stop_unblocks_wait(self):
         with tempfile.TemporaryDirectory() as td:
             bridge = AskBridge(Path(td) / "ask")
-            bridge.begin("task-2", 101, 202, None)
+            task_key = "2" * 16
+            bridge.begin(task_key, 101, 202, None)
             result = []
-            t = threading.Thread(target=lambda: result.append(
-                _ask(bridge.directory, {"question": "Continue?"})))
-            t.start()
-            for _ in range(30):
-                if bridge.next_question("task-2"):
-                    break
-                time.sleep(0.05)
-            bridge.end("task-2")
-            t.join(timeout=2)
+            with patch.dict(__import__("os").environ,
+                            {"ANDROID_TELEGRAM_AGENT_TASK_KEY": task_key}):
+                t = threading.Thread(target=lambda: result.append(
+                    _ask(bridge.directory, {"question": "Continue?"})))
+                t.start()
+                for _ in range(30):
+                    if bridge.next_question(task_key):
+                        break
+                    time.sleep(0.05)
+                bridge.end(task_key)
+                t.join(timeout=2)
             self.assertIn("ended", result[0])
 
     def test_choices_must_have_description(self):
         with tempfile.TemporaryDirectory() as td:
             bridge = AskBridge(Path(td) / "ask")
-            bridge.begin("task-3", 1, 2, None)
-            answer = _ask(bridge.directory, {
-                "question": "?", "choices": [{"label": "A", "value": "a"}]})
+            task_key = "3" * 16
+            bridge.begin(task_key, 1, 2, None)
+            with patch.dict(__import__("os").environ,
+                            {"ANDROID_TELEGRAM_AGENT_TASK_KEY": task_key}):
+                answer = _ask(bridge.directory, {
+                    "question": "?", "choices": [{"label": "A", "value": "a"}]})
             self.assertIn("description", answer)
-            bridge.end("task-3")
+            bridge.end(task_key)
 
 
 if __name__ == "__main__":

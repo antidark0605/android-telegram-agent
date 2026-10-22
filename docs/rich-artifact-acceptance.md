@@ -1,6 +1,6 @@
 # Android v0.2: Telegram Rich Output and Artifact Acceptance
 
-Revision: 5 — 2026-10-19
+Revision: 6 — 2026-10-22
 
 This is a **candidate**, not a deployment log. Use synthetic file names and
 data. No real device model, hardware serial, company name, chat ID, Bot token,
@@ -36,7 +36,7 @@ raw Termux logs belong in this public document.
 | R12 | Explicit Rich unsupported HTTP 400/404 | Safe HTML text and standard sendDocument/sendPhoto fallback |
 | R13 | Telegram timeout during output | No automatic duplicate or unsafe fallback; private log categorizes failure |
 | R14 | Idle and active memory during multipart upload | Bounded memory and clean temporary resources |
-| R15 | Existing /session, /model, /status, /myid, Stop and Ask | No regressions; exactly one task at a time |
+| R15 | Existing /session, /model, /status, /myid, Stop and Ask | No regressions; one task per Topic, bounded cross-Topic concurrency |
 | R16 | Public PR SHA and patch, workflow logs, filename/constants scan | No company/private/hardware/device, user identifiers or credentials |
 | R17 | `/format` rich/classic/raw selected in two Topics, then `/new` | Mode is stored, survives conversation reset and applies only to the selected Topic; callback owner/chat/topic/message is checked; raw body is unformatted but media markers remain extracted metadata |
 | R18 | Inbound document/photo with unsafe name, MIME, size, path and cancellation; `.md` as `text/markdown` and `text/plain` | Authorized task only; bounded private temp file; valid Markdown accepted; invalid input gets a generic authorized reply and is cleaned; unauthorized input stays silent |

@@ -189,17 +189,17 @@ class BotTests(unittest.TestCase):
         runner = MagicMock()
         runner.run.return_value = AgentResult(True, "Synthetic answer")
         runner._cancelled.is_set.return_value = False
-        task = Task("synthetic-task", 101, 202, None, scope(101, 202, None), runner,
+        task = Task("a" * 16, 101, 202, None, scope(101, 202, None), runner,
                     "gemini-test", 0, photo={"file_id": "synthetic"},
                     workspace=selected)
-        self.bot._active = task
+        self.bot._active[task.session_key] = task
         with patch("bot.download_photo", return_value=path) as download:
             self.bot._execute(task, "Describe this", None)
         self.assertEqual(download.call_args.args[2], selected)
         self.assertTrue((selected / "artifacts").is_dir())
         self.assertIn(str(path), runner.run.call_args.args[0])
         self.assertFalse(path.exists())
-        self.assertIsNone(self.bot._active)
+        self.assertFalse(self.bot._active)
 
     def test_photo_cleanup_error_does_not_leave_task_busy(self):
         from sessions import scope
@@ -207,12 +207,12 @@ class BotTests(unittest.TestCase):
         runner = MagicMock()
         runner.run.return_value = AgentResult(False, "Synthetic failure")
         runner._cancelled.is_set.return_value = False
-        task = Task("synthetic-task", 101, 202, None, scope(101, 202, None), runner,
+        task = Task("a" * 16, 101, 202, None, scope(101, 202, None), runner,
                     "gemini-test", 0, photo={"file_id": "synthetic"})
-        self.bot._active = task
+        self.bot._active[task.session_key] = task
         with patch("bot.download_photo", return_value=path), patch.object(Path, "unlink", side_effect=OSError()):
             self.bot._execute(task, "Describe this", None)
-        self.assertIsNone(self.bot._active)
+        self.assertFalse(self.bot._active)
         self.assertIn('"event":"photo_cleanup_failed"', self.bot.events.path.read_text())
 
     def test_photo_gates_before_download(self):
@@ -225,7 +225,7 @@ class BotTests(unittest.TestCase):
                 download.assert_not_called()
                 runner.assert_not_called()
         self.bot.sessions.change(key, started=True, model="gemini-test")
-        self.bot._auxiliary = True
+        self.bot._auxiliary.add(key)
         with patch("bot.download_photo") as download, patch("bot.AgyRunner") as runner:
             self.bot.handle_update(self.photo_update())
             download.assert_not_called()
@@ -384,25 +384,25 @@ class BotTests(unittest.TestCase):
         from bot import Pending
         from sessions import scope
         runner = MagicMock()
-        task = Task("abcd1234", 101, 202, 7, scope(101, 202, 7), runner, None, 1)
+        task = Task("b" * 16, 101, 202, 7, scope(101, 202, 7), runner, None, 1)
         question = {"task": task.key, "id": "a" * 32, "chat": 202,
                     "topic": 7, "choices": []}
         with self.bot._lock:
-            self.bot._active = task
-            self.bot._pending = Pending(question, 9)
+            self.bot._active[task.session_key] = task
+            self.bot._pending[task.session_key] = Pending(question, 9)
         with patch.object(self.bot.bridge, "answer") as answer:
             self.bot.handle_update(update("my answer", topic=7))
         answer.assert_called_once_with(question, "my answer")
-        self.assertIsNone(self.bot._pending)
+        self.assertFalse(self.bot._pending)
 
     def test_wrong_topic_does_not_answer(self):
         from bot import Pending
         from sessions import scope
-        task = Task("task1234", 101, 202, 7, scope(101, 202, 7), MagicMock(), None, 1)
+        task = Task("c" * 16, 101, 202, 7, scope(101, 202, 7), MagicMock(), None, 1)
         question = {"task": task.key, "id": "b" * 32, "chat": 202,
                     "topic": 7, "choices": []}
-        self.bot._active = task
-        self.bot._pending = Pending(question, 3)
+        self.bot._active[task.session_key] = task
+        self.bot._pending[task.session_key] = Pending(question, 3)
         with patch.object(self.bot.bridge, "answer") as answer:
             self.bot.handle_update(update("different topic", topic=8))
         answer.assert_not_called()
@@ -411,14 +411,14 @@ class BotTests(unittest.TestCase):
         from sessions import scope
         runner = MagicMock()
         runner.cancel.return_value = True
-        task = Task("12ab34cd", 101, 202, None, scope(101, 202, None),
+        task = Task("d" * 16, 101, 202, None, scope(101, 202, None),
                     runner, None, 1, message_id=4)
-        self.bot._active = task
-        self.bot.handle_update(callback("stop:12ab34cd", 4, user=999))
+        self.bot._active[task.session_key] = task
+        self.bot.handle_update(callback("stop:" + task.key, 4, user=999))
         self.bot.handle_update(callback("stop:old", 4))
-        self.bot.handle_update(callback("stop:12ab34cd", 8))
+        self.bot.handle_update(callback("stop:" + task.key, 8))
         runner.cancel.assert_not_called()
-        self.bot.handle_update(callback("stop:12ab34cd", 4))
+        self.bot.handle_update(callback("stop:" + task.key, 4))
         runner.cancel.assert_called_once()
 
     def test_real_task_updates_session_and_status(self):
@@ -431,14 +431,14 @@ class BotTests(unittest.TestCase):
                 {"input_tokens": 11})
             instance._cancelled.is_set.return_value = False
             self.bot.handle_update(update("hello"))
-            worker = self.bot._worker
+            worker = next(iter(self.bot._workers.values()), None)
             if worker:
                 worker.join(3)
         self.assertEqual(self.bot.sessions.get(key)["conversation_id"], "12345678-aaaa")
         self.assertEqual(self.bot.sessions.get(key)["last_usage"]["input_tokens"], 11)
         self.assertTrue(any("已完成" in item[2] for item in self.api.edits))
         self.assertTrue(any("model result" in item[1] for item in self.api.sent))
-        self.assertIsNone(self.bot._active)
+        self.assertFalse(self.bot._active)
 
     def test_successful_agy_but_failed_session_save_is_not_marked_complete(self):
         with patch("bot.AgyRunner") as factory:
@@ -449,7 +449,7 @@ class BotTests(unittest.TestCase):
             runner._cancelled.is_set.return_value = False
             with patch.object(self.bot.sessions, "change", side_effect=OSError):
                 self.bot.handle_update(update("test question"))
-                worker = self.bot._worker
+                worker = next(iter(self.bot._workers.values()), None)
                 if worker:
                     worker.join(3)
         self.assertFalse(any("已完成" in edit[2] for edit in self.api.edits))
@@ -462,7 +462,7 @@ class BotTests(unittest.TestCase):
         lines = self.bot.events.path.read_text(encoding="utf8").splitlines()
         self.assertTrue(any('"event":"session_failed"' in line for line in lines))
         self.assertTrue(any('"kind":"failed"' in line for line in lines))
-        self.assertIsNone(self.bot._active)
+        self.assertFalse(self.bot._active)
 
     def test_session_reset_failure_is_reported(self):
         with patch.object(self.bot.sessions, "reset", side_effect=OSError):
@@ -472,14 +472,14 @@ class BotTests(unittest.TestCase):
     def test_stale_stop_callback_rejected_after_agent_finishes(self):
         from sessions import scope
         runner = MagicMock()
-        task = Task("mock-task", 101, 202, None, scope(101, 202, None),
+        task = Task("e" * 16, 101, 202, None, scope(101, 202, None),
                     runner, "gemini-3.8-flash-high", 10,
                     message_id=13, delivering=True)
-        self.bot._active = task
-        self.bot.handle_update(callback("stop:mock-task", 13))
+        self.bot._active[task.session_key] = task
+        self.bot.handle_update(callback("stop:" + task.key, 13))
         runner.cancel.assert_not_called()
         self.assertIn("already finished", self.api.acks[-1][1])
-        self.bot._active = None
+        self.bot._active.clear()
 
     def test_agent_final_answer_declared_artifact_is_delivered_only_to_topic(self):
         from sessions import scope
@@ -496,7 +496,7 @@ class BotTests(unittest.TestCase):
                 True, output, "12345678-abc0", {})
             factory.return_value._cancelled.is_set.return_value = False
             self.bot.handle_update(update("prepare a file", topic=topic))
-            worker = self.bot._worker
+            worker = next(iter(self.bot._workers.values()), None)
             if worker:
                 worker.join(timeout=4)
         self.assertTrue(self.api.rich_sent)
@@ -506,7 +506,7 @@ class BotTests(unittest.TestCase):
         self.assertNotIn("TAGW_MEDIA", message)
         self.assertEqual(len(media), 1)
         self.assertEqual(media[0].filename, "result.txt")
-        self.assertIsNone(self.bot._active)
+        self.assertFalse(self.bot._active)
 
     def test_successful_agy_with_failed_rich_delivery_is_not_confirmed(self):
         from telegram_api import TelegramError
@@ -517,7 +517,7 @@ class BotTests(unittest.TestCase):
             with patch.object(self.api, "send_rich", side_effect=TelegramError(
                     "network response unknown", kind="transport")):
                 self.bot.handle_update(update("test"))
-                worker = self.bot._worker
+                worker = next(iter(self.bot._workers.values()), None)
                 if worker:
                     worker.join(timeout=4)
         self.assertTrue(any("Delivery unconfirmed" in edit[2]
@@ -525,9 +525,9 @@ class BotTests(unittest.TestCase):
         self.assertFalse(any("已完成" in edit[2]
                              for edit in self.api.edits))
         self.assertEqual(self.api.edits[-1][3], {"inline_keyboard": []})
-        self.assertIsNone(self.bot._active)
+        self.assertFalse(self.bot._active)
 
-    def test_busy_only_one_process(self):
+    def test_same_topic_rejects_second_task(self):
         entered, exit_now = threading.Event(), threading.Event()
         def slow_run(*args, **kwargs):
             entered.set()
@@ -541,9 +541,60 @@ class BotTests(unittest.TestCase):
             self.bot.handle_update(update("second"))
             self.assertTrue(any("busy" in x[1] for x in self.api.sent))
             exit_now.set()
-            worker = self.bot._worker
+            worker = next(iter(self.bot._workers.values()), None)
             if worker: worker.join(3)
             runner.return_value.run.assert_called_once()
+
+    def test_different_topics_run_concurrently_and_keep_controls_scoped(self):
+        from sessions import scope
+        entered = [threading.Event(), threading.Event()]
+        release = threading.Event()
+        runners = []
+        for index in range(2):
+            runner = MagicMock()
+            runner._cancelled.is_set.return_value = False
+            runner.run.side_effect = lambda *a, _index=index, **k: (
+                entered[_index].set(), release.wait(2),
+                AgentResult(True, "topic result"))[2]
+            runners.append(runner)
+        for topic in (11, 12):
+            self.bot.sessions.change(scope(101, 202, topic),
+                                     model="example-high", started=True)
+        with patch("bot.AgyRunner", side_effect=runners):
+            self.bot.handle_update(update("first", topic=11))
+            self.bot.handle_update(update("second", topic=12))
+            self.assertTrue(all(event.wait(2) for event in entered))
+            self.assertEqual(set(self.bot._active), {
+                scope(101, 202, 11), scope(101, 202, 12)})
+            tasks = dict(self.bot._active)
+            self.bot.handle_update(callback(
+                "stop:" + tasks[scope(101, 202, 11)].key,
+                tasks[scope(101, 202, 11)].message_id, topic=12))
+            runners[0].cancel.assert_not_called()
+            with patch("bot.list_models",
+                       return_value=[("example-high", "Example High")]) as models:
+                self.bot.handle_update(update("/model", topic=13))
+            models.assert_called_once()
+            release.set()
+            workers = list(self.bot._workers.values())
+            for worker in workers:
+                worker.join(3)
+        self.assertFalse(self.bot._active)
+
+    def test_global_capacity_is_bounded_without_cross_topic_state_leak(self):
+        from sessions import scope
+        self.bot.settings = __import__("dataclasses").replace(
+            self.bot.settings, max_concurrent_tasks=1)
+        task = Task("4" * 16, 101, 202, 21, scope(101, 202, 21),
+                    MagicMock(), "example-high", 1.0)
+        self.bot._active[task.session_key] = task
+        self.bot.sessions.change(scope(101, 202, 22),
+                                 model="example-high", started=True)
+        with patch("bot.AgyRunner") as runner:
+            self.bot.handle_update(update("second topic", topic=22))
+        runner.assert_not_called()
+        self.assertIn("capacity is full", self.api.sent[-1][1])
+        self.assertNotIn(scope(101, 202, 22), self.bot._active)
 
     def test_ls_fixed_argv_and_authorization(self):
         nested = self.bot.settings.workspace / "artifacts"
@@ -713,9 +764,9 @@ class BotTests(unittest.TestCase):
             self.bot.sessions.change(scope(101, 202, 70), model="example-high")
             self.bot.handle_update(update("hello", topic=70))
         self.assertEqual(runner.call_args.args[1], selected)
-        self.assertEqual(self.bot._active.workspace, selected)
+        self.assertEqual(next(iter(self.bot._active.values())).workspace, selected)
         worker.return_value.start.assert_called_once()
-        self.bot._active = None
+        self.bot._active.clear()
 
     def test_session_start_creates_private_nested_and_quoted_cwd(self):
         import stat
@@ -808,14 +859,15 @@ class BotTests(unittest.TestCase):
                                  model="example-high",
                                  conversation_id="active-conversation")
         before = self.bot.sessions.get(key)
-        self.bot._active = Task("synthetic-task", 101, 202, 93, key, MagicMock(),
-                                "example-high", 1.0, workspace=old)
+        task = Task("a" * 16, 101, 202, 93, key, MagicMock(),
+                    "example-high", 1.0, workspace=old)
+        self.bot._active[key] = task
         with patch.object(self.bot.bridge, "install") as install:
             self.bot.handle_update(update("/session start new-running", topic=93))
         self.assertEqual(self.bot.sessions.get(key), before)
         self.assertIn("Stop the running task first", self.api.sent[-1][1])
         install.assert_not_called()
-        self.bot._active = None
+        self.bot._active.clear()
 
     def test_invalid_saved_cwd_is_reported_without_crashing(self):
         from sessions import scope
@@ -857,14 +909,15 @@ class BotTests(unittest.TestCase):
             runner.run.return_value = AgentResult(True, "ok", "existing-conversation")
             runner._cancelled.is_set.return_value = False
             self.bot.handle_update(update("continue", topic=60))
-            worker = self.bot._worker
+            worker = next(iter(self.bot._workers.values()), None)
             if worker:
                 worker.join(3)
             self.assertEqual(runner.run.call_args.kwargs["conversation_id"], "existing-conversation")
             self.assertEqual(runner.run.call_args.kwargs["model"], "example-high")
 
     def test_quota_command_does_not_show_quote_separator_markers(self):
-        self.bot._quota(202, None, "gemini-test")
+        from sessions import scope
+        self.bot._quota(202, None, scope(101, 202, None), "gemini-test")
         text = self.api.sent[-1][1]
         self.assertIn("Context: unavailable\n5h: unavailable\nWeekly: unavailable", text)
         self.assertNotIn("\n>\n", text)
@@ -873,7 +926,7 @@ class BotTests(unittest.TestCase):
     def test_status_timer_text(self):
         self.assertIn("00:00", status_text("Running", __import__("time").monotonic(), None))
 
-    def run_task(self, result, model="gemini-test", key="synthetic-key",
+    def run_task(self, result, model="gemini-test", key="f" * 16,
                  cancelled=False, topic=None):
         import time
         from sessions import scope
@@ -882,7 +935,7 @@ class BotTests(unittest.TestCase):
         runner._cancelled.is_set.return_value = cancelled
         task = Task(key, 101, 202, topic, scope(101, 202, topic), runner,
                     model, time.monotonic())
-        self.bot._active = task
+        self.bot._active[task.session_key] = task
         self.bot._execute(task, "prompt", None)
         return task
 
@@ -910,15 +963,15 @@ class BotTests(unittest.TestCase):
                          if k == "edit" and "已完成" in t)
         self.assertLess(delivering, kinds.index("rich"))
         self.assertLess(kinds.index("rich"), completed)
-        self.assertIsNone(self.bot._active)
+        self.assertFalse(self.bot._active)
 
     def test_timer_edits_status_with_stop_and_stops_when_delivering(self):
         from bot import Pending
         from sessions import scope
-        task = Task("timer-key", 101, 202, 7, scope(101, 202, 7), MagicMock(),
+        task = Task("1" * 16, 101, 202, 7, scope(101, 202, 7), MagicMock(),
                     "gemini-test", __import__("time").monotonic(), message_id=5)
-        self.bot._active = task
-        self.bot._pending = Pending({"task": task.key}, 9)
+        self.bot._active[task.session_key] = task
+        self.bot._pending[task.session_key] = Pending({"task": task.key}, 9)
         done = MagicMock()
         done.wait.side_effect = [False, True]
         self.bot._timer(task, done)
@@ -926,7 +979,7 @@ class BotTests(unittest.TestCase):
         chat, mid, text, markup, mode = self.api.edits[-1]
         self.assertEqual((chat, mid, mode), (202, 5, "HTML"))
         self.assertIn("等待回覆", text)
-        self.assertEqual(markup["inline_keyboard"][0][0]["callback_data"], "stop:timer-key")
+        self.assertEqual(markup["inline_keyboard"][0][0]["callback_data"], "stop:" + task.key)
         task.delivering = True
         done.wait.side_effect = [False, True]
         count = len(self.api.edits)
@@ -936,7 +989,7 @@ class BotTests(unittest.TestCase):
         self.assertEqual(len(self.api.actions), action_count)
 
         task.delivering = False
-        self.bot._pending = None
+        self.bot._pending.clear()
         done.wait.side_effect = [False, True]
         self.bot._timer(task, done)
         self.assertEqual(self.api.actions[-1], (202, "typing", 7))
@@ -944,13 +997,13 @@ class BotTests(unittest.TestCase):
     def test_typing_failure_does_not_fail_active_task(self):
         from telegram_api import TelegramError
         from sessions import scope
-        task = Task("typing-key", 101, 202, 9, scope(101, 202, 9), MagicMock(),
+        task = Task("2" * 16, 101, 202, 9, scope(101, 202, 9), MagicMock(),
                     "gemini-test", __import__("time").monotonic())
-        self.bot._active = task
+        self.bot._active[task.session_key] = task
         with patch.object(self.api, "send_chat_action",
                           side_effect=TelegramError("synthetic", kind="transport")):
             self.bot._typing(task)
-        self.assertIs(self.bot._active, task)
+        self.assertIs(self.bot._active.get(task.session_key), task)
         records = self.bot.events.path.read_text(encoding="utf8")
         self.assertIn('"event":"chat_action_failed"', records)
         self.assertNotIn("synthetic", records)
@@ -958,10 +1011,10 @@ class BotTests(unittest.TestCase):
     def test_typing_is_suppressed_while_task_ask_is_pending(self):
         from bot import Pending
         from sessions import scope
-        task = Task("typing-key", 101, 202, 9, scope(101, 202, 9), MagicMock(),
+        task = Task("2" * 16, 101, 202, 9, scope(101, 202, 9), MagicMock(),
                     "example-high", 1.0)
-        self.bot._active = task
-        self.bot._pending = Pending({"task": task.key}, 1)
+        self.bot._active[task.session_key] = task
+        self.bot._pending[task.session_key] = Pending({"task": task.key}, 1)
         self.bot._typing(task)
         self.assertFalse(self.api.actions)
 
@@ -970,12 +1023,12 @@ class BotTests(unittest.TestCase):
         from sessions import scope
         runner = MagicMock()
         runner.cancel.return_value = True
-        task = Task("emit-key", 101, 202, None, scope(101, 202, None),
+        task = Task("3" * 16, 101, 202, None, scope(101, 202, None),
                     runner, "gemini-test", 1, message_id=4)
-        self.bot._active = task
+        self.bot._active[task.session_key] = task
         _, markup = progress_message("running", task.started, task.key)
         data = markup["inline_keyboard"][0][0]["callback_data"]
-        self.assertEqual(data, "stop:emit-key")
+        self.assertEqual(data, "stop:" + task.key)
         self.bot.handle_update(callback(data, 4, user=999))
         self.bot.handle_update(callback(data, 4, chat=999))
         self.bot.handle_update(callback(data, 5))

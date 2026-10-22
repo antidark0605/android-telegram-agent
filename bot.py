@@ -110,11 +110,12 @@ class TelegramAgyBot:
         self.last = LastStore(settings.config_path.parent / "last.json")
         self.lifecycle = LifecycleStore(settings.config_path.parent / "lifecycle.json")
         self._lock = threading.RLock()
-        self._active: Task | None = None
-        self._worker: threading.Thread | None = None
-        self._picker: Picker | None = None
-        self._pending: Pending | None = None
-        self._auxiliary = False
+        # Runtime state follows the same user/chat/Topic scope as SessionStore.
+        self._active: dict[str, Task] = {}
+        self._workers: dict[str, threading.Thread] = {}
+        self._pickers: dict[str, Picker] = {}
+        self._pending: dict[str, Pending] = {}
+        self._auxiliary: set[str] = set()
         self._stop = threading.Event()
         self._running = False
         self._started_at = datetime.now(timezone.utc)
@@ -268,9 +269,11 @@ class TelegramAgyBot:
     def _typing(self, task: Task) -> None:
         """Refresh Telegram's short-lived typing action without affecting a task."""
         with self._lock:
-            waiting = (self._pending is not None and
-                       self._pending.question.get("task") == task.key)
-            if self._active is not task or task.delivering or waiting:
+            pending = self._pending.get(task.session_key)
+            waiting = (pending is not None and
+                       pending.question.get("task") == task.key)
+            if (self._active.get(task.session_key) is not task
+                    or task.delivering or waiting):
                 return
         try:
             self.api.send_chat_action(task.chat, "typing", task.thread)
@@ -340,8 +343,8 @@ class TelegramAgyBot:
             return
         key = scope(user, chat_id, thread)
         with self._lock:
-            pending = self._pending
-            active = self._active
+            pending = self._pending.get(key)
+            active = self._active.get(key)
         if incoming and pending and active:
             self._send(chat_id, "請先用文字回答目前的提問，再傳送附件。", thread)
             return
@@ -349,7 +352,7 @@ class TelegramAgyBot:
         if (pending and active and pending.question["task"] == active.key
                 and active.owner == user and active.chat == chat_id
                 and active.thread == thread and not text.startswith("/")):
-            self._answer_question(pending, text[:3000])
+            self._answer_question(key, pending, text[:3000])
             return
         if cmd in ("/start", "/help"):
             self._send(chat_id, "AGY Telegram Agent\n"
@@ -367,7 +370,7 @@ class TelegramAgyBot:
         elif cmd == "/status":
             row = self.sessions.get(key)
             text_out = (status_text("⏳ Running", active.started, active.model)
-                        if active and active.session_key == key else "Idle")
+                        if active else "Idle")
             try:
                 cwd = self._workspace(row)
                 cwd_text = str(cwd)
@@ -388,7 +391,7 @@ class TelegramAgyBot:
                 requested = fields[1] if len(fields) == 2 else None
                 active_session = (row.get("started") is True
                                   or bool(row.get("conversation_id")))
-                if active and active.session_key == key:
+                if active:
                     self._send(chat_id, "Stop the running task first.", thread)
                 elif active_session and requested is None:
                     self._send(chat_id, "This chat/topic already has an active session.", thread)
@@ -432,7 +435,7 @@ class TelegramAgyBot:
                                 self._send(chat_id, f"Session activated for this chat/topic.\n"
                                            f"CWD: {cwd}\nChoose /model, then send a task.", thread)
         elif cmd == "/new":
-            if active and active.session_key == key:
+            if active:
                 self._send(chat_id, "Stop the running task first.", thread)
             else:
                 try:
@@ -474,13 +477,15 @@ class TelegramAgyBot:
                            "Last completed task tokens (NOT context used %):\n" + details, thread)
         elif cmd in ("/quota", "/usage"):
             with self._lock:
-                available = self._active is None and not self._auxiliary
+                available = key not in self._active and key not in self._auxiliary
                 if available:
-                    self._auxiliary = True
+                    self._auxiliary.add(key)
             if not available:
                 self._send(chat_id, "AGY is busy; retry quota later.", thread)
             else:
-                threading.Thread(target=self._quota, args=(chat_id, thread, self.sessions.get(key).get("model")),
+                threading.Thread(target=self._quota,
+                                 args=(chat_id, thread, key,
+                                       self.sessions.get(key).get("model")),
                                  daemon=True, name="agy-quota").start()
         elif text.startswith("/") and incoming is None:
             self._send(chat_id, "Unknown command. Try /help.", thread)
@@ -527,17 +532,18 @@ class TelegramAgyBot:
         except (OSError, ValueError, subprocess.TimeoutExpired):
             self._send(chat, "Workspace listing unavailable.", thread)
 
-    def _quota(self, chat: int, thread: int | None, model: str | None = None) -> None:
+    def _quota(self, chat: int, thread: int | None, key: str,
+               model: str | None = None) -> None:
         try:
             data, _at, cached = self.quota.get()
             self._send(chat, usage_plain(model, data, cached), thread)
         finally:
             with self._lock:
-                self._auxiliary = False
+                self._auxiliary.discard(key)
 
     def _models(self, user: int, chat: int, thread: int | None, key: str) -> None:
         with self._lock:
-            busy = self._active is not None or self._auxiliary
+            busy = key in self._active or key in self._auxiliary
         if busy:
             self._send(chat, "Model selection is unavailable during an active task.", thread)
             return
@@ -560,12 +566,12 @@ class TelegramAgyBot:
                          {"inline_keyboard": buttons})
         if mid:
             with self._lock:
-                self._picker = Picker(user, chat, thread, mid, options)
+                self._pickers[key] = Picker(user, chat, thread, mid, options)
 
     def _display(self, user: int, chat: int, thread: int | None, key: str,
                  requested: str = "") -> None:
         with self._lock:
-            busy = self._active is not None or self._auxiliary
+            busy = key in self._active or key in self._auxiliary
         if busy:
             self._send(chat, "Display selection is unavailable during an active task.", thread)
             return
@@ -585,9 +591,10 @@ class TelegramAgyBot:
                          + DISPLAY_LABELS[current], thread, display_keyboard(current))
         if mid:
             with self._lock:
-                self._picker = Picker(user, chat, thread, mid,
-                                      [(mode, DISPLAY_LABELS[mode]) for mode in DISPLAY_MODES],
-                                      kind="display")
+                self._pickers[key] = Picker(
+                    user, chat, thread, mid,
+                    [(mode, DISPLAY_LABELS[mode]) for mode in DISPLAY_MODES],
+                    kind="display")
 
     def _last_reply(self, chat: int, thread: int | None, key: str) -> None:
         row = self.last.get(key)
@@ -604,8 +611,10 @@ class TelegramAgyBot:
     def _start_task(self, prompt: str, user: int, chat: int,
                     thread: int | None, key: str, photo: dict | None = None) -> None:
         with self._lock:
-            if self._active is not None or self._auxiliary:
+            if key in self._active or key in self._auxiliary:
                 busy = True
+            elif len(self._active) >= self.settings.max_concurrent_tasks:
+                busy = "capacity"
             else:
                 busy = False
                 row = self.sessions.get(key)
@@ -628,28 +637,33 @@ class TelegramAgyBot:
                 task = Task(secrets.token_hex(8), user, chat, thread, key, runner,
                             row.get("model"), time.monotonic(), photo=photo,
                             display_mode=display_mode, workspace=workspace)
-                self._active = task
+                self._active[key] = task
                 self.events.log("task_started", stage="agy")
-                self._worker = threading.Thread(
+                worker = threading.Thread(
                     target=self._execute,
                     args=(task, prompt, row.get("conversation_id")),
-                    daemon=True, name="agy-task")
-                self._worker.start()
-        if busy:
+                    daemon=True, name="agy-task-" + task.key[:8])
+                self._workers[key] = worker
+                worker.start()
+        if busy == "capacity":
+            self._send(chat, "AGY task capacity is full; retry after another Topic finishes.", thread)
+        elif busy:
             self._send(chat, "AGY is busy. Use Stop on the running task.", thread)
 
     def _timer(self, task: Task, done: threading.Event) -> None:
         with self._lock:
-            waiting = (self._pending is not None and
-                       self._pending.question.get("task") == task.key)
+            pending = self._pending.get(task.session_key)
+            waiting = (pending is not None and
+                       pending.question.get("task") == task.key)
         if not waiting:
             self._typing(task)
         while not done.wait(4):
             with self._lock:
-                if self._active is not task or task.delivering:
+                if self._active.get(task.session_key) is not task or task.delivering:
                     return
-                waiting = (self._pending is not None and
-                           self._pending.question.get("task") == task.key)
+                pending = self._pending.get(task.session_key)
+                waiting = (pending is not None and
+                           pending.question.get("task") == task.key)
             self._edit_status(task, "waiting" if waiting else "running")
             if not waiting:
                 self._typing(task)
@@ -701,7 +715,8 @@ class TelegramAgyBot:
                         "Never declare private files outside artifacts/.")
             workspace = resolve_workspace(self.settings.workspace, str(workspace))[0]
             outcome = task.runner.run(prompt + ask_hint, model=task.model,
-                                      conversation_id=cid, yolo=self.settings.yolo)
+                                      conversation_id=cid, yolo=self.settings.yolo,
+                                      task_key=task.key)
             ok, result_text = outcome.ok, outcome.message
             if ok:
                 updates = {"last_usage": outcome.usage}
@@ -735,7 +750,7 @@ class TelegramAgyBot:
             if ticker:
                 ticker.join(timeout=12)
             with self._lock:
-                self._pending = None
+                self._pending.pop(task.session_key, None)
             self.bridge.end(task.key)
             rendered = result_text
             if ok:
@@ -763,16 +778,18 @@ class TelegramAgyBot:
             self.events.log("task_finished", kind=task_kind, stage="agy",
                             elapsed_ms=int((time.monotonic() - task.started) * 1000))
             with self._lock:
-                if self._active is task:
-                    self._active, self._worker = None, None
+                if self._active.get(task.session_key) is task:
+                    self._active.pop(task.session_key, None)
+                    self._workers.pop(task.session_key, None)
 
     def _poll_questions(self) -> None:
         with self._lock:
-            task = self._active
-            if self._pending is not None:
-                return
-        if task is None:
-            return
+            tasks = [task for key, task in self._active.items()
+                     if key not in self._pending]
+        for task in tasks:
+            self._poll_task_question(task)
+
+    def _poll_task_question(self, task: Task) -> None:
         q = self.bridge.next_question(task.key)
         if q is None:
             return
@@ -792,8 +809,8 @@ class TelegramAgyBot:
                          {"inline_keyboard": buttons} if buttons else None)
         if mid:
             with self._lock:
-                if self._active is task:
-                    self._pending = Pending(q, mid)
+                if self._active.get(task.session_key) is task:
+                    self._pending[task.session_key] = Pending(q, mid)
         else:
             # Retry delivery; do not leave a question silently unanswerable.
             retry = self.bridge.questions / (q["id"] + ".json")
@@ -803,11 +820,11 @@ class TelegramAgyBot:
             except OSError:
                 pass
 
-    def _answer_question(self, pending: Pending, answer: str) -> None:
+    def _answer_question(self, key: str, pending: Pending, answer: str) -> None:
         with self._lock:
-            if self._pending is not pending:
+            if self._pending.get(key) is not pending:
                 return
-            self._pending = None
+            self._pending.pop(key, None)
         self.bridge.answer(pending.question, answer)
         self._edit(pending.question["chat"], pending.message_id,
                    "✅ Answer received. AGY continues.")
@@ -838,9 +855,10 @@ class TelegramAgyBot:
             "ask" if data.startswith("ask:") else "other")
         self.events.log("callback_authorized", kind=action)
         self._record_destination(uid, cid, thread)
+        key = scope(uid, cid, thread)
         if data.startswith("stop:"):
             with self._lock:
-                task = self._active
+                task = self._active.get(key)
                 valid = (task is not None and task.key == data[5:]
                          and task.owner == uid and task.chat == cid
                          and task.thread == thread
@@ -854,8 +872,8 @@ class TelegramAgyBot:
         elif data.startswith("model:"):
             save_failed = False
             with self._lock:
-                picker = self._picker
-                busy = self._active is not None or self._auxiliary
+                picker = self._pickers.get(key)
+                busy = key in self._active or key in self._auxiliary
                 valid = (picker is not None and picker.user == uid
                          and picker.chat == cid and picker.thread == thread
                          and picker.kind == "model" and picker.message_id == mid)
@@ -873,7 +891,7 @@ class TelegramAgyBot:
                         model = False
                         save_failed = True
                     else:
-                        self._picker = None
+                        self._pickers.pop(key, None)
             if model is False:
                 self._ack(qid, "Model selection could not be saved."
                           if save_failed
@@ -884,8 +902,8 @@ class TelegramAgyBot:
         elif data.startswith("display:"):
             mode = data[8:]
             with self._lock:
-                picker = self._picker
-                busy = self._active is not None or self._auxiliary
+                picker = self._pickers.get(key)
+                busy = key in self._active or key in self._auxiliary
                 valid = (picker is not None and picker.kind == "display"
                          and picker.user == uid and picker.chat == cid
                          and picker.thread == thread and picker.message_id == mid
@@ -896,7 +914,7 @@ class TelegramAgyBot:
                     except (OSError, ValueError):
                         valid = False
                     else:
-                        self._picker = None
+                        self._pickers.pop(key, None)
             if not valid:
                 self._ack(qid, "Display menu expired or task is running.")
             else:
@@ -904,7 +922,7 @@ class TelegramAgyBot:
                 self._edit(cid, mid, "Reply display: " + DISPLAY_LABELS[mode])
         elif data.startswith("ask:"):
             with self._lock:
-                pending, task = self._pending, self._active
+                pending, task = self._pending.get(key), self._active.get(key)
                 fields = data.split(":")
                 valid = (pending is not None and task is not None
                          and len(fields) == 3 and fields[1] == pending.question["id"][:16]
@@ -915,7 +933,7 @@ class TelegramAgyBot:
                 opts = pending.question["choices"] if valid else []
                 idx = int(fields[2]) if fields[-1].isascii() and fields[-1].isdecimal() else -1
             if valid and 0 <= idx < len(opts):
-                self._answer_question(pending, opts[idx]["value"])
+                self._answer_question(key, pending, opts[idx]["value"])
                 self._ack(qid, "Answer recorded.")
             else:
                 self._ack(qid, "Question expired.")
@@ -998,10 +1016,11 @@ class TelegramAgyBot:
                 self._running = False
             self.events.log("bot_stopped", stage="shutdown")
             with self._lock:
-                task, worker = self._active, self._worker
-            if task:
+                tasks = list(self._active.values())
+                workers = list(self._workers.values())
+            for task in tasks:
                 task.runner.cancel()
-            if worker:
+            for worker in workers:
                 worker.join(timeout=15)
 
     def stop(self) -> None:

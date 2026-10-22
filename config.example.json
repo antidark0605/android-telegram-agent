@@ -6,6 +6,7 @@
   "agy_command": "agy",
   "workspace": "YOUR_PRIVATE_WORKSPACE_PATH",
   "task_timeout_seconds": null,
+  "max_concurrent_tasks": 3,
   "print_timeout": "24h",
   "yolo": false,
   "allow_unlisted_myid": false

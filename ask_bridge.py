@@ -11,16 +11,17 @@ from pathlib import Path
 from sessions import write_private
 
 ID = re.compile(r"[0-9a-f]{32}")
+TASK_ID = re.compile(r"[0-9a-f]{16}")
 
 class AskBridge:
     def __init__(self, directory: Path):
         self.directory = directory
         self.questions = directory / "questions"
         self.answers = directory / "answers"
-        for path in (directory, self.questions, self.answers):
+        self.active = directory / "active"
+        for path in (directory, self.questions, self.answers, self.active):
             path.mkdir(parents=True, mode=0o700, exist_ok=True)
             path.chmod(0o700)
-        self.active = directory / "active.json"
 
     def _managed_entry(self, value: object) -> bool:
         """Recognize this Bot's prior release entry without executing it."""
@@ -87,18 +88,23 @@ class AskBridge:
         write_private(config, current)
 
     def begin(self, task_key: str, user: int, chat: int, topic: int | None) -> None:
-        write_private(self.active, {"task": task_key, "user": user, "chat": chat,
-                                    "topic": topic})
+        if not TASK_ID.fullmatch(task_key):
+            raise ValueError("Invalid task routing key")
+        write_private(self.active / (task_key + ".json"),
+                      {"task": task_key, "user": user, "chat": chat,
+                       "topic": topic})
 
     def end(self, task_key: str) -> None:
         try:
-            current = json.loads(self.active.read_text(encoding="utf8"))
-            if current.get("task") == task_key:
-                self.active.unlink(missing_ok=True)
-        except (ValueError, OSError):
+            (self.active / (task_key + ".json")).unlink(missing_ok=True)
+        except OSError:
             pass
         for directory in (self.questions, self.answers):
-            for file in directory.iterdir():
+            try:
+                files = list(directory.iterdir())
+            except OSError:
+                continue
+            for file in files:
                 try:
                     data = json.loads(file.read_text(encoding="utf8"))
                     if data.get("task") == task_key:
@@ -134,7 +140,10 @@ def _response(message_id, result: dict) -> dict:
 
 def _ask(root: Path, args: dict) -> str:
     try:
-        active_file = root / "active.json"
+        task_key = os.environ.get("ANDROID_TELEGRAM_AGENT_TASK_KEY", "")
+        if not TASK_ID.fullmatch(task_key):
+            return "(no active Telegram task)"
+        active_file = root / "active" / (task_key + ".json")
         active = json.loads(active_file.read_text(encoding="utf8"))
         if not active.get("task") or type(active.get("chat")) is not int:
             return "(no active Telegram task)"
