@@ -29,7 +29,7 @@ from presentation import (DISPLAY_LABELS, DISPLAY_MODES,
                           render_response, usage_plain)
 from usage_footer import QuotaService
 from workspace_policy import (WorkspaceError, resolve_list_directory,
-                              resolve_workspace)
+                              resolve_or_create_workspace, resolve_workspace)
 from vendor.telegram_ui.service_lifecycle import (ServiceLifecycleView,
                                                    render_service_lifecycle)
 from rich_delivery import _html_fallback
@@ -394,7 +394,7 @@ class TelegramAgyBot:
                     self._send(chat_id, "This chat/topic already has an active session.", thread)
                 else:
                     try:
-                        cwd, relative = resolve_workspace(
+                        cwd, relative = resolve_or_create_workspace(
                             self.settings.workspace, requested)
                         self.bridge.install(cwd)
                     except WorkspaceError as exc:

@@ -72,6 +72,56 @@ def resolve_workspace(root: Path, requested: str | None = None) -> tuple[Path, s
     return resolved, "." if not relative.parts else relative.as_posix()
 
 
+def resolve_or_create_workspace(root: Path,
+                                requested: str | None = None) -> tuple[Path, str]:
+    """Resolve a safe workspace, creating a missing requested directory tree."""
+    configured, _relative = resolve_workspace(root)
+    if requested is None:
+        return configured, "."
+    if not isinstance(requested, str):
+        raise WorkspaceError("Saved CWD state is invalid.")
+    value = requested.strip()
+    if (len(value) >= 2 and value[0] == value[-1]
+            and value[0] in {"'", '"'}):
+        value = value[1:-1].strip()
+    if (not value or len(value) > 512
+            or any(ord(character) < 32 or ord(character) == 127
+                   for character in value)):
+        raise WorkspaceError("CWD is empty or invalid.")
+    raw = Path(value)
+    if ".." in raw.parts:
+        raise WorkspaceError("CWD cannot contain parent-directory traversal.")
+    candidate = raw if raw.is_absolute() else configured / raw
+    candidate = candidate.absolute()
+    if not candidate.is_relative_to(configured):
+        raise WorkspaceError("CWD must stay inside the configured workspace.")
+
+    missing: list[Path] = []
+    current = candidate
+    while not current.exists() and not current.is_symlink():
+        if current == configured:
+            break
+        missing.append(current)
+        current = current.parent
+    # Validate the nearest existing ancestor before writing anything.
+    resolve_workspace(configured, str(current))
+    for directory in reversed(missing):
+        try:
+            directory.mkdir(mode=0o700)
+        except FileExistsError:
+            pass  # Revalidation below rejects files and symlinks.
+        except PermissionError:
+            raise WorkspaceError(
+                "The Bot lacks permission to create this CWD."
+            ) from None
+        except OSError:
+            raise WorkspaceError("CWD could not be created.") from None
+        # mode 0700 combined with the process umask cannot add public bits;
+        # revalidation also catches a file or symlink created in a race.
+        resolve_workspace(configured, str(directory))
+    return resolve_workspace(configured, str(candidate))
+
+
 def resolve_list_directory(root: Path, workspace: Path,
                            requested: str | None = None) -> Path:
     """Resolve an ``/ls`` target inside the current Topic workspace.
