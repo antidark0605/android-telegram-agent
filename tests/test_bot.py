@@ -558,12 +558,16 @@ class BotTests(unittest.TestCase):
             self.assertNotIn("shell", run.call_args.kwargs)
             self.assertEqual(self.api.sent[-1][2], 7)
             self.assertTrue(self.api.sent[-1][1].startswith(
-                "Path: " + str(self.bot.settings.workspace) + "\n"))
+                "<b>📂 Directory listing</b>\n"))
+            self.assertIn("<b>path</b>: <code>" + str(self.bot.settings.workspace)
+                          + "</code>", self.api.sent[-1][1])
+            self.assertEqual(self.api.sent[-1][4], "HTML")
+            self.assertIn("<pre>", self.api.sent[-1][1])
             self.assertIn("sample.txt", self.api.sent[-1][1])
             self.bot.handle_update(update("/ls artifacts"))
             self.assertEqual(run.call_args.args[0], ["ls", "-l", "--", str(nested)])
             self.assertEqual(run.call_args.kwargs["cwd"], str(nested))
-            self.assertTrue(self.api.sent[-1][1].startswith("Path: " + str(nested) + "\n"))
+            self.assertIn("<code>" + str(nested) + "</code>", self.api.sent[-1][1])
             self.bot.handle_update(update('/ls "artifacts"'))
             self.assertEqual(run.call_args.args[0], ["ls", "-l", "--", str(nested)])
             self.assertEqual(run.call_count, 3)
@@ -619,9 +623,32 @@ class BotTests(unittest.TestCase):
             self.assertIn("failed", self.api.sent[-1][1])
             run.return_value.returncode = 0
             run.return_value.stdout = "x" * 15000
+            before = len(self.api.sent)
             self.bot.handle_update(update("/ls"))
-            self.assertIn("truncated", self.api.sent[-1][1])
-            self.assertLessEqual(len(self.api.sent[-1][1]), 12000)
+            sent = self.api.sent[before:]
+            self.assertIn("truncated", sent[-1][1])
+            self.assertGreater(len(sent), 1)
+            from vendor.telegram_ui import utf16_length
+            self.assertTrue(all(item[4] == "HTML" for item in sent))
+            self.assertTrue(all(utf16_length(item[1]) <= 4096 for item in sent))
+
+    def test_ls_format_rejection_falls_back_but_transport_error_does_not_retry(self):
+        from telegram_api import TelegramError
+        with patch("bot.subprocess.run") as run:
+            run.return_value.returncode = 0
+            run.return_value.stdout = "synthetic listing\n"
+            rejected = TelegramError("synthetic", kind="api", http_status=400)
+            with patch.object(self.api, "send_text", side_effect=[rejected, 9]) as send:
+                self.bot.handle_update(update("/ls"))
+            self.assertEqual(send.call_count, 2)
+            self.assertEqual(send.call_args_list[0].kwargs["parse_mode"], "HTML")
+            self.assertNotIn("parse_mode", send.call_args_list[1].kwargs)
+            self.assertIn("Directory listing", send.call_args_list[1].args[1])
+
+            ambiguous = TelegramError("synthetic", kind="transport")
+            with patch.object(self.api, "send_text", side_effect=ambiguous) as send:
+                self.bot.handle_update(update("/ls"))
+            send.assert_called_once()
 
     def test_status_native_id_cwd_and_model(self):
         from sessions import scope
@@ -681,7 +708,7 @@ class BotTests(unittest.TestCase):
             self.bot.handle_update(update("/ls", topic=70))
         self.assertEqual(run.call_args.args[0], ["ls", "-l", "--", str(selected)])
         self.assertEqual(run.call_args.kwargs["cwd"], str(selected))
-        self.assertIn("Path: " + str(selected), self.api.sent[-1][1])
+        self.assertIn("<code>" + str(selected) + "</code>", self.api.sent[-1][1])
         with patch("bot.AgyRunner") as runner, patch("bot.threading.Thread") as worker:
             self.bot.sessions.change(scope(101, 202, 70), model="example-high")
             self.bot.handle_update(update("hello", topic=70))

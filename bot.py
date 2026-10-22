@@ -23,7 +23,8 @@ from last_store import LastStore
 from lifecycle_store import LifecycleStore
 from sessions import SessionStore, scope, write_private
 from telegram_api import TelegramAPI, TelegramError
-from presentation import (DISPLAY_LABELS, DISPLAY_MODES, display_keyboard,
+from presentation import (DISPLAY_LABELS, DISPLAY_MODES,
+                          directory_listing_messages, display_keyboard,
                           normalize_display_mode, progress_message,
                           render_response, usage_plain)
 from usage_footer import QuotaService
@@ -498,12 +499,31 @@ class TelegramAgyBot:
             if result.returncode != 0:
                 self._send(chat, "Workspace listing failed.", thread)
                 return
-            output = result.stdout or "Workspace listing is empty."
-            header = f"Path: {workspace}\n"
-            remaining = 12000 - len(header) - len("\n[Listing truncated]")
+            output = result.stdout or "(empty)"
+            remaining = 12000 - len("\n[Listing truncated]")
             if len(output) > remaining:
                 output = output[:remaining] + "\n[Listing truncated]"
-            self._send(chat, header + output, thread)
+            for formatted, plain in directory_listing_messages(str(workspace), output):
+                self.events.log("send_attempt", stage="send_message")
+                try:
+                    self.api.send_text(chat, formatted, thread, parse_mode="HTML")
+                    self.events.log("send_ok", stage="send_message")
+                except TelegramError as exc:
+                    self.events.log("send_failed", stage="send_message", kind=exc.kind,
+                                    http_status=exc.http_status)
+                    # Telegram HTTP/API 400 proves the formatted send was rejected;
+                    # transport failures are ambiguous and must not be replayed.
+                    if exc.http_status != 400 or exc.kind not in {"http", "api"}:
+                        return
+                    self.events.log("send_attempt", stage="send_message")
+                    try:
+                        self.api.send_text(chat, plain, thread)
+                        self.events.log("send_ok", stage="send_message")
+                    except TelegramError as fallback_exc:
+                        self.events.log("send_failed", stage="send_message",
+                                        kind=fallback_exc.kind,
+                                        http_status=fallback_exc.http_status)
+                        return
         except (OSError, ValueError, subprocess.TimeoutExpired):
             self._send(chat, "Workspace listing unavailable.", thread)
 

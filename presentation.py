@@ -5,6 +5,7 @@ and Telegram transport stay in their existing modules.
 """
 from __future__ import annotations
 
+import html
 import time
 import re
 
@@ -12,7 +13,7 @@ from rich_delivery import _html_fallback
 from usage_footer import LOCAL_TIMEZONE
 from vendor.telegram_ui import (
     DisplayProfile, QuotaWindow, ReplyView, UsageView,
-    render_progress, render_reply, render_usage,
+    render_progress, render_reply, render_usage, utf16_length,
 )
 
 AGENT = "AGY"
@@ -28,6 +29,43 @@ DELIVERING_ACTIVITY = "📤 Delivering answer"
 UNCONFIRMED_LINE = "**傳送**：⚠️ Delivery unconfirmed"
 STATUS_STATES = frozenset({"running", "waiting", "delivering", "completed",
                            "cancelled", "failed", "unconfirmed"})
+TELEGRAM_FORMATTED_LIMIT = 4096
+
+
+def directory_listing_messages(path: str, body: str) -> list[tuple[str, str]]:
+    """Return complete, UTF-16-bounded HTML chunks and plain fallbacks."""
+    safe_path = html.escape(path, quote=False)
+    html_header = ("<b>📂 Directory listing</b>\n"
+                   f"<b>path</b>: <code>{safe_path}</code>\n"
+                   "—————\n")
+    plain_header = f"📂 Directory listing\npath: {path}\n—————\n"
+    remaining = body or "(empty)"
+    messages: list[tuple[str, str]] = []
+    first = True
+    while remaining:
+        prefix = html_header if first else ""
+        plain_prefix = plain_header if first else ""
+        low, high, best = 1, len(remaining), 0
+        while low <= high:
+            middle = (low + high) // 2
+            candidate = prefix + "<pre>" + html.escape(
+                remaining[:middle], quote=False) + "</pre>"
+            if utf16_length(candidate) <= TELEGRAM_FORMATTED_LIMIT:
+                best = middle
+                low = middle + 1
+            else:
+                high = middle - 1
+        if best == 0:
+            raise ValueError("Directory listing header exceeds Telegram limit")
+        # Prefer a nearby complete line without creating tiny fragments.
+        line_end = remaining.rfind("\n", 0, best)
+        if line_end >= best // 2:
+            best = line_end + 1
+        piece, remaining = remaining[:best], remaining[best:]
+        formatted = prefix + "<pre>" + html.escape(piece, quote=False) + "</pre>"
+        messages.append((formatted, plain_prefix + piece))
+        first = False
+    return messages
 
 
 def _family(model) -> str | None:

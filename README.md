@@ -1,6 +1,6 @@
 # android-telegram-agent
 
-Revision: 9 — 2026-10-22
+Revision: 10 — 2026-10-22
 
 Small non-root **Termux + Telegram + official AGY CLI** Bot for Android. Original Python standard-library code, not a port of another private codebase. No root, inbound ports, OpenClaw, collaboration, kanban, server framework, or pip dependencies.
 
@@ -23,7 +23,7 @@ Termux and service guides linked below.
 | /format | Pick `rich`, `classic` or `raw` (unformatted body) reply transport; **per Topic** |
 | /last | Manually resend the bounded, private last reply for this Topic |
 | /session start [CWD] | Activate the current chat/Topic without submitting a prompt; optionally select an existing private directory inside the configured workspace |
-| /ls [PATH] | List the current Topic CWD, or a directory below it, using `ls -l`; the resolved path is shown |
+| /ls [PATH] | List the current Topic CWD, or a directory below it, using a formatted `ls -l` view with the resolved path |
 | /context | Show last task's accounting tokens; **not** an invented context occupancy percentage |
 | /quota, /usage | Request AGY's standalone /usage rate-limit report, if supported |
 | Inline 🛑 中斷 (Stop) | Cancel that active AGY task; no /cancel command |
@@ -44,7 +44,7 @@ While AGY is actively processing and has not entered final delivery, the Bot ref
 
 After polling state and the update offset are ready, the Bot sends one lifecycle notice per previously used, currently authorized user/chat pair, routed to that pair's most recently used Topic. The first persisted ready instance reports `ready`; later instances report `restarted`. The cause remains unknown without host evidence and the notice never claims a model is loaded. A send is attempted at most once per pair in one process; an unconfirmed attempt is not replayed in that process and may be tried again on the next start. Destinations are learned only from authorized inbound use, not by broadcasting to every allowlist entry.
 
-**Model identification:** `/status` displays the configured or selected model, not a guessed effective model. Models selected through Telegram are passed as AGY's `--model` argument to the *next* run; an active task cannot change its model. If a validated AGY JSON result explicitly provides an `actual_model` field, the Bot saves it separately; without one it displays **not reported**. The former AGY default option only omitted `--model`; it did not identify a particular model. It has been removed, together with `/models` and `/model default`. Choose an explicit model before submitting tasks. Effort is part of the AGY model variant (for example High/Medium/Low), not a separate Bot setting. A native session ID remains pending until AGY returns a validated conversation ID. `/ls [PATH]` resolves relative paths from the current Topic CWD, accepts absolute paths only below that same CWD, and displays the resolved path. It excludes hidden entries like `ls -l`; traversal, symlinked, foreign-owned, unsafe-permission, inaccessible and non-directory targets fail before `ls` starts. Listings have a five-second deadline and bounded output. Listing failures do not expose stderr.
+**Model identification:** `/status` displays the configured or selected model, not a guessed effective model. Models selected through Telegram are passed as AGY's `--model` argument to the *next* run; an active task cannot change its model. If a validated AGY JSON result explicitly provides an `actual_model` field, the Bot saves it separately; without one it displays **not reported**. The former AGY default option only omitted `--model`; it did not identify a particular model. It has been removed, together with `/models` and `/model default`. Choose an explicit model before submitting tasks. Effort is part of the AGY model variant (for example High/Medium/Low), not a separate Bot setting. A native session ID remains pending until AGY returns a validated conversation ID. `/ls [PATH]` resolves relative paths from the current Topic CWD, accepts absolute paths only below that same CWD, and displays the resolved path in the same title/path/code-block layout as `telegram-agent-bot`. Every HTML chunk is independently bounded by Telegram UTF-16 units; an explicit formatting rejection safely falls back to plain text, while an ambiguous network failure is not retried. It excludes hidden entries like `ls -l`; traversal, symlinked, foreign-owned, unsafe-permission, inaccessible and non-directory targets fail before `ls` starts. Listings have a five-second deadline and bounded output. Listing failures do not expose stderr.
 
 ### Ask Telegram
 

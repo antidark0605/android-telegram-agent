@@ -7,7 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 from usage_footer import QuotaService, parse_quota
-from presentation import (PROFILE, progress_message, reply_markdown, stop_markup,
+from presentation import (PROFILE, directory_listing_messages,
+                          progress_message, reply_markdown, stop_markup,
                           usage_plain, usage_view)
 from vendor.telegram_ui import render_usage
 
@@ -107,6 +108,21 @@ class UsageTests(unittest.TestCase):
 
 
 class PresentationTests(unittest.TestCase):
+    def test_directory_listing_html_is_escaped_and_utf16_bounded(self):
+        from vendor.telegram_ui import utf16_length
+        body = ("😀 & <entry>\n" * 900)
+        messages = directory_listing_messages("/safe/<cwd>", body)
+        self.assertGreater(len(messages), 1)
+        self.assertTrue(messages[0][0].startswith("<b>📂 Directory listing</b>"))
+        self.assertIn("<code>/safe/&lt;cwd&gt;</code>", messages[0][0])
+        self.assertTrue(all(utf16_length(formatted) <= 4096
+                            for formatted, _plain in messages))
+        self.assertTrue(all("&lt;entry&gt;" in formatted
+                            for formatted, _plain in messages))
+        reconstructed = messages[0][1].split("—————\n", 1)[1]
+        reconstructed += "".join(plain for _formatted, plain in messages[1:])
+        self.assertEqual(reconstructed, body)
+
     def test_body_and_standalone_artifact_marker_preserved_exactly(self):
         import tempfile
         from artifacts import extract_artifacts
