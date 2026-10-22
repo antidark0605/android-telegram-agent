@@ -1,6 +1,6 @@
 # android-telegram-agent
 
-Revision: 11 — 2026-10-22
+Revision: 12 — 2026-10-22
 
 Small non-root **Termux + Telegram + official AGY CLI** Bot for Android. Original Python standard-library code, not a port of another private codebase. No root, inbound ports, OpenClaw, collaboration, kanban, server framework, or pip dependencies.
 
@@ -36,7 +36,7 @@ removed command can remain visible until this synchronization or a BotFather upd
 The standard private/group category scopes are cleared to inherit the same default;
 the Bot does not create per-chat or per-language command overrides.
 
-Each task sends one formatted progress status message (state and elapsed seconds) with 🛑 中斷 (Stop), edited in place around every four seconds, and a separate final answer. Stop is tied to the authorized user, chat, exact status-message ID and unique task key. While the answer is being delivered the status shows *Delivering* without Stop; it shows completed only after Telegram acknowledges the answer, otherwise *Delivery unconfirmed*. Once finished, the button is removed. `/status` remains a plain-text summary. One AGY process at a time prevents memory spikes on small devices.
+Each task sends one formatted progress status message (state and elapsed seconds) with 🛑 中斷 (Stop), edited in place around every four seconds, and a separate final answer. Stop is tied to the authorized user, chat, exact status-message ID and unique task key. While the answer is being delivered the status shows *Delivering* without Stop; it shows completed only after Telegram acknowledges the answer, otherwise *Delivery unconfirmed*. Once finished, the button is removed. `/status` remains a plain-text summary. Each Topic has at most one active task. Different Topics may run concurrently up to `max_concurrent_tasks` (default 3); excess Topics are rejected before AGY starts. Stop, typing, Ask Telegram state, model/display pickers and cleanup remain scoped to the originating Topic.
 
 **Topics:** A fresh chat/Topic requires `/session start` before ordinary text can run AGY. `/session start [CWD]` may select an existing directory or create a missing directory tree below the configured workspace; a relative path is resolved below that workspace, while an absolute path must remain inside the same boundary. Quoted paths with spaces are accepted. Existing ancestors are validated before creation, and each new directory is restricted to mode 0700. Inaccessible, non-directory, symlinked, foreign-owned or group/world-writable paths fail before activation and must be corrected and re-entered. Omitting `[CWD]` selects the configured workspace. An active Topic may be rebound with an explicit different CWD; rebinding clears its native conversation ID so the next task starts a new AGY conversation while preserving model and display selections. This activates the current scope; it does not create a Telegram Topic. A pre-existing saved AGY conversation remains activated. The private chat (no Topic) has its own separate Session. Each Telegram `message_thread_id` has a separate CWD, AGY conversation ID, Model selection and last task token accounting. A new Topic does not require creating another Bot Token. `/new` resets only the current Topic while preserving its CWD, model and display mode. Restarting the Bot preserves its Session mappings in a private JSON file. Invalid/corrupted state stops startup rather than silently erasing conversations; a failed persistence operation never updates the in-memory mapping.
 
@@ -135,6 +135,7 @@ Replace placeholders in `$HOME/.config/android-telegram-agent/config.json` using
   "agy_command": "agy",
   "workspace": "/ABSOLUTE/PRIVATE/TERMUX/WORKSPACE",
   "task_timeout_seconds": null,
+  "max_concurrent_tasks": 3,
   "print_timeout": "24h",
   "yolo": false,
   "allow_unlisted_myid": false
@@ -153,6 +154,8 @@ modify private config, workspace, credentials or session state, and never restar
 service automatically.
 
 `task_timeout_seconds: null` means no Python-imposed task deadline. `print_timeout: "24h"` extends the **separate AGY Headless deadline**: it is **not literally unlimited**. The installed CLI must accept this duration. The Stop button remains available. Owners can choose another valid AGY duration. Device testing should verify actual long runs, cancellation and cleanup before assuming robust background behavior.
+
+`max_concurrent_tasks` accepts 1–8 and bounds the number of Topics that may run AGY simultaneously. Use `1` on memory-constrained devices; the default `3` matches the shared Telegram gateway's bounded worker default. This limit does not merge Topic sessions: each Topic keeps its own conversation, CWD, model and controls.
 
 **YOLO warning:** `yolo: true` adds `--dangerously-skip-permissions` to AGY invocation, allowing AGY to auto-approve tool operations accessible to its Android UID. This greatly expands what remotely submitted prompts can do. Public sample is deliberately `false`. Enable it **only in a trusted, private deployment under explicit owner approval**, restrict Bot access with the user/chat allowlist, and use a dedicated workspace. A working directory is **not a filesystem security boundary**. The Bot does not change global AGY permission settings.
 

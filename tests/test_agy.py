@@ -84,6 +84,22 @@ class AgyRunnerTests(unittest.TestCase):
         self.assertNotIn("--dangerously-skip-permissions", args)
         self.assertNotIn("--conversation", args)
 
+    def test_task_key_is_validated_and_passed_only_via_child_environment(self):
+        proc = self._proc()
+        with (patch("agy.subprocess.Popen", return_value=proc) as spawn,
+              patch("agy.os.killpg")):
+            result = AgyRunner("agy", Path("/tmp"), None).run(
+                "hello", task_key="a" * 16)
+        self.assertTrue(result.ok)
+        self.assertEqual(spawn.call_args.kwargs["env"][
+            "ANDROID_TELEGRAM_AGENT_TASK_KEY"], "a" * 16)
+        self.assertNotIn("a" * 16, spawn.call_args.args[0])
+        with patch("agy.subprocess.Popen") as rejected:
+            result = AgyRunner("agy", Path("/tmp"), None).run(
+                "hello", task_key="../unsafe")
+        self.assertFalse(result.ok)
+        rejected.assert_not_called()
+
     def test_invalid_model_or_session_rejected_before_start(self):
         with patch("agy.subprocess.Popen") as spawn:
             runner = AgyRunner("agy", Path("/tmp"), 30)

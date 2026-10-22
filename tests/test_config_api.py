@@ -41,6 +41,18 @@ class ConfigurationTests(unittest.TestCase):
         c = load_settings(self.conf)
         self.assertEqual(c.allowed_pairs, {(101, -202)})
         self.assertEqual(c.task_timeout_seconds, 40)
+        self.assertEqual(c.max_concurrent_tasks, 3)
+
+    def test_concurrency_limit_is_bounded(self):
+        for value in (1, 8):
+            self.data["max_concurrent_tasks"] = value
+            self._write()
+            self.assertEqual(load_settings(self.conf).max_concurrent_tasks, value)
+        for value in (0, 9, True, "many"):
+            self.data["max_concurrent_tasks"] = value
+            self._write()
+            with self.assertRaises(ConfigError):
+                load_settings(self.conf)
 
     def test_myid_bootstrap_is_explicit_boolean(self):
         self.data["allowed_pairs"] = []

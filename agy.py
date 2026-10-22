@@ -11,6 +11,7 @@ from pathlib import Path
 
 MODEL_SLUG = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9.]+){1,8}")
 CONVERSATION_ID = re.compile(r"[a-zA-Z0-9_-]{8,128}")
+TASK_KEY = re.compile(r"[0-9a-f]{16}")
 
 @dataclass(frozen=True)
 class AgentResult:
@@ -97,7 +98,8 @@ class AgyRunner:
         return True
 
     def run(self, prompt: str, model: str | None = None,
-            conversation_id: str | None = None, yolo: bool = False) -> AgentResult:
+            conversation_id: str | None = None, yolo: bool = False,
+            task_key: str | None = None) -> AgentResult:
         if self._cancelled.is_set():
             return AgentResult(False, "AGY task cancelled.")
         argv = [self.command, "-p", prompt, "--output-format", "json",
@@ -112,11 +114,17 @@ class AgyRunner:
             argv.extend(["--conversation", conversation_id])
         if yolo:
             argv.append("--dangerously-skip-permissions")
+        if task_key is not None and not TASK_KEY.fullmatch(task_key):
+            return AgentResult(False, "Invalid task routing key.")
+        env = os.environ.copy()
+        if task_key is not None:
+            env["ANDROID_TELEGRAM_AGENT_TASK_KEY"] = task_key
         try:
             proc = subprocess.Popen(
                 argv, cwd=str(self.workspace), stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
-                start_new_session=True, text=True, encoding="utf-8", errors="replace")
+                start_new_session=True, text=True, encoding="utf-8", errors="replace",
+                env=env)
         except (OSError, ValueError):
             return AgentResult(False, "Cannot start AGY; check Termux installation.")
         with self._lock:

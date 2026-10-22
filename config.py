@@ -23,6 +23,7 @@ class Settings:
     yolo: bool = False
     print_timeout: str = "24h"
     allow_unlisted_myid: bool = False
+    max_concurrent_tasks: int = 3
 
     @property
     def state_path(self) -> Path:
@@ -109,4 +110,7 @@ def load_settings(filename: str | Path) -> Settings:
     if (not isinstance(print_timeout, str)
             or not __import__("re").fullmatch(r"[1-9][0-9]{0,4}[smh]", print_timeout)):
         raise ConfigError("print_timeout must be a positive duration like 24h")
-    return Settings(token, frozenset(allowed), command, work, timeout, path, yolo, print_timeout, discover_ids)
+    max_tasks = _integer(raw.get("max_concurrent_tasks", 3),
+                         "max_concurrent_tasks", minimum=1, maximum=8)
+    return Settings(token, frozenset(allowed), command, work, timeout, path,
+                    yolo, print_timeout, discover_ids, max_tasks)

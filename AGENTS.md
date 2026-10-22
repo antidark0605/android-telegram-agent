@@ -1,6 +1,6 @@
 # android-telegram-agent 開發規範
 
-Revision: 2 — 2026-10-21
+Revision: 3 — 2026-10-22
 
 ## 適用範圍
 
@@ -8,7 +8,8 @@ Revision: 2 — 2026-10-21
 - 開始工作前完整閱讀 `README.md`、`docs/termux-setup.md`、
   `docs/service-setup.md`，以及與變更相關的程式與測試。
 - 初期產品範圍是官方 AGY、非 root Termux、Python 標準函式庫 Bot、Telegram
-  long polling、每次僅一個 AGY 任務。Codex、Claude 或其他 agent adapter 不在目前範圍。
+  long polling、每個 Topic 同時僅一個 AGY 任務，並以設定的全域上限限制跨 Topic 並行數。
+  Codex、Claude 或其他 agent adapter 不在目前範圍。
 - 工作目錄不是安全 sandbox；實際工具權限仍由 AGY 與 Android App 使用者權限決定。
 
 ## 語言與文件
