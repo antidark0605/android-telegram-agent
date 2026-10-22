@@ -717,6 +717,34 @@ class BotTests(unittest.TestCase):
         worker.return_value.start.assert_called_once()
         self.bot._active = None
 
+    def test_session_start_creates_private_nested_and_quoted_cwd(self):
+        import stat
+        from sessions import scope
+        nested = self.bot.settings.workspace / "new" / "nested workspace"
+        self.assertFalse(nested.exists())
+
+        self.bot.handle_update(
+            update('/session start "new/nested workspace"', topic=72))
+
+        row = self.bot.sessions.get(scope(101, 202, 72))
+        self.assertTrue(row["started"])
+        self.assertEqual(row["cwd"], "new/nested workspace")
+        self.assertTrue(nested.is_dir())
+        self.assertEqual(stat.S_IMODE((self.bot.settings.workspace / "new").stat().st_mode),
+                         0o700)
+        self.assertEqual(stat.S_IMODE(nested.stat().st_mode), 0o700)
+        self.assertIn("CWD: " + str(nested), self.api.sent[-1][1])
+
+    def test_session_start_creation_permission_failure_is_safe(self):
+        from sessions import scope
+        with patch("workspace_policy.Path.mkdir", side_effect=PermissionError):
+            self.bot.handle_update(update("/session start blocked/new", topic=73))
+        reply = self.api.sent[-1][1]
+        self.assertIn("lacks permission to create", reply)
+        self.assertIn("re-enter /session start [CWD]", reply)
+        self.assertFalse(
+            self.bot.sessions.get(scope(101, 202, 73)).get("started", False))
+
     def test_session_start_rejects_unsafe_cwd_with_safe_reason(self):
         from sessions import scope
         outside = (self.bot.settings.workspace.parent /
@@ -726,10 +754,11 @@ class BotTests(unittest.TestCase):
         link = self.bot.settings.workspace / "alias"
         link.symlink_to(outside)
         cases = [
-            ("missing", "does not exist"),
             ("../outside", "parent-directory traversal"),
             (str(outside), "inside the configured workspace"),
+            (str(outside / "missing"), "inside the configured workspace"),
             ("alias", "symbolic links"),
+            ("alias/new", "symbolic links"),
             ("bad\npath", "empty or invalid"),
         ]
         for topic, (value, reason) in enumerate(cases, 80):

@@ -1,6 +1,6 @@
 # Termux 依賴與安裝
 
-Revision: 6 — 2026-10-21
+Revision: 7 — 2026-10-22
 
 適用於 `antidark0605/android-telegram-agent` 的 AGY 對話版本。以下命令在 Android **Termux App 前景、一般使用者**執行，不在電腦或 root ADB shell 執行。本文是安裝指南，不授權變更已有服務或認證。
 
@@ -103,7 +103,7 @@ python -c 'from config import load_settings; from pathlib import Path; load_sett
 python bot.py --config "$HOME/.config/android-telegram-agent/config.json"
 ```
 
-`CONFIG_OK` 才表示設定檢查通過；範本假值會被拒絕。Bot 保持前景，先傳 `/start`、`/status`，在目標聊天／Topic 傳 `/session start`，或用 `/session start projects/demo` 選擇設定 workspace 內既有的私人子目錄；路徑或權限被拒絕時依回覆修正後重新輸入。已啟用的 Topic 可用 `/session start <另一個CWD>` 重新綁定；這會清除舊 native conversation，下一項任務建立新對話。再用 `/model` 選定模型，並用 `/format` 選擇每個 Topic 的 rich/classic/raw 模式；raw 表示無格式正文，附件 marker 仍會被安全抽取，不會顯示或洩漏。最後傳新純文字或一個照片／文件附件。AGY 實際處理期間，同一 Topic 應持續顯示 Telegram typing；等待 Ask Telegram 使用者回答及結果投遞期間不顯示。`/last` 僅是目前 Topic 的手動重送；不會把模糊網路失敗自動重播成 exactly-once。必須在相同聊天／話題收到真實模型答案，才記往返 PASS；首次启动會捨棄舊排隊訊息。完成本次測試後按 Ctrl+C 停止本次 Bot。來源：[`bot.py`](../bot.py)、[`workspace_policy.py`](../workspace_policy.py)、[`telegram_api.py`](../telegram_api.py)、[`incoming_media.py`](../incoming_media.py)、[`last_store.py`](../last_store.py)。
+`CONFIG_OK` 才表示設定檢查通過；範本假值會被拒絕。Bot 保持前景，先傳 `/start`、`/status`，在目標聊天／Topic 傳 `/session start`，或用 `/session start projects/demo` 選擇或建立設定 workspace 內的私人子目錄；不存在的多層路徑會在既有父目錄通過擁有者、權限、symlink 與 workspace 邊界檢查後以 mode 0700 建立。含空格路徑可使用成對單引號或雙引號。路徑或權限被拒絕時依回覆修正後重新輸入。已啟用的 Topic 可用 `/session start <另一個CWD>` 重新綁定；這會清除舊 native conversation，下一項任務建立新對話。再用 `/model` 選定模型，並用 `/format` 選擇每個 Topic 的 rich/classic/raw 模式；raw 表示無格式正文，附件 marker 仍會被安全抽取，不會顯示或洩漏。最後傳新純文字或一個照片／文件附件。AGY 實際處理期間，同一 Topic 應持續顯示 Telegram typing；等待 Ask Telegram 使用者回答及結果投遞期間不顯示。`/last` 僅是目前 Topic 的手動重送；不會把模糊網路失敗自動重播成 exactly-once。必須在相同聊天／話題收到真實模型答案，才記往返 PASS；首次启动會捨棄舊排隊訊息。完成本次測試後按 Ctrl+C 停止本次 Bot。來源：[`bot.py`](../bot.py)、[`workspace_policy.py`](../workspace_policy.py)、[`telegram_api.py`](../telegram_api.py)、[`incoming_media.py`](../incoming_media.py)、[`last_store.py`](../last_store.py)。
 
 回滾到不支援 per-Topic CWD 的舊版本時，舊程式會忽略 session state 中的 `cwd`，並改用 configured workspace 根目錄。停止 Bot 後先刪除私人 config 目錄內的 `last.json`，避免舊版 `/last` 從根目錄傳送同名附件；曾使用子目錄 CWD 的每個 Topic 必須在回滾後、執行任何新任務前先輸入 `/new`。舊版 `/status` 無法證明對話已與根目錄重新對齊。
 
