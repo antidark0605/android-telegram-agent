@@ -27,7 +27,8 @@ from presentation import (DISPLAY_LABELS, DISPLAY_MODES, display_keyboard,
                           normalize_display_mode, progress_message,
                           render_response, usage_plain)
 from usage_footer import QuotaService
-from workspace_policy import WorkspaceError, resolve_workspace
+from workspace_policy import (WorkspaceError, resolve_list_directory,
+                              resolve_workspace)
 from vendor.telegram_ui.service_lifecycle import (ServiceLifecycleView,
                                                    render_service_lifecycle)
 from rich_delivery import _html_fallback
@@ -358,7 +359,7 @@ class TelegramAgyBot:
                        "/model: choose an explicit model\n"
                        "/format: choose rich/classic/raw reply display\n"
                        "/last: manually resend the last saved reply\n"
-                       "/ls: list workspace files (ls -l)\n"
+                       "/ls [PATH]: list the Topic CWD or one of its subdirectories (ls -l)\n"
                        "/status, /context, /quota: show status\n"
                        "Tap 🛑 中斷 (Stop) to interrupt running tasks.\n"
                        "No collaboration or kanban.", thread)
@@ -452,16 +453,14 @@ class TelegramAgyBot:
         elif cmd == "/last":
             self._last_reply(chat_id, thread, key)
         elif cmd == "/ls":
-            if arg.strip():
-                self._send(chat_id, "Use /ls without arguments: lists this workspace only.", thread)
+            try:
+                cwd = self._workspace(self.sessions.get(key))
+                target = resolve_list_directory(
+                    self.settings.workspace, cwd, arg.strip() or None)
+            except WorkspaceError as exc:
+                self._send(chat_id, f"Path rejected: {exc} Re-enter /ls [PATH].", thread)
             else:
-                try:
-                    cwd = self._workspace(self.sessions.get(key))
-                except WorkspaceError as exc:
-                    self._send(chat_id, f"CWD unavailable: {exc} Re-enter "
-                               "/session start [CWD].", thread)
-                else:
-                    self._list_workspace(chat_id, thread, cwd)
+                self._list_workspace(chat_id, thread, target)
         elif cmd == "/context":
             row = self.sessions.get(key)
             usage = row.get("last_usage", {})
@@ -499,10 +498,12 @@ class TelegramAgyBot:
             if result.returncode != 0:
                 self._send(chat, "Workspace listing failed.", thread)
                 return
-            output = result.stdout
-            if len(output) > 12000:
-                output = output[:12000] + "\n[Listing truncated]"
-            self._send(chat, output or "Workspace listing is empty.", thread)
+            output = result.stdout or "Workspace listing is empty."
+            header = f"Path: {workspace}\n"
+            remaining = 12000 - len(header) - len("\n[Listing truncated]")
+            if len(output) > remaining:
+                output = output[:remaining] + "\n[Listing truncated]"
+            self._send(chat, header + output, thread)
         except (OSError, ValueError, subprocess.TimeoutExpired):
             self._send(chat, "Workspace listing unavailable.", thread)
 
