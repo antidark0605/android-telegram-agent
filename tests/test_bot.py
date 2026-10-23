@@ -623,7 +623,7 @@ class BotTests(unittest.TestCase):
             self.assertEqual(run.call_args.args[0], ["ls", "-l", "--", str(nested)])
             self.assertEqual(run.call_count, 3)
 
-    def test_ls_rejects_paths_outside_topic_cwd_before_subprocess(self):
+    def test_ls_accepts_accessible_paths_outside_topic_cwd_and_symlinks(self):
         from sessions import scope
         selected = self.bot.settings.workspace / "work"
         selected.mkdir(mode=0o700)
@@ -633,35 +633,55 @@ class BotTests(unittest.TestCase):
         sibling.mkdir(mode=0o700)
         file_target = selected / "result.txt"
         file_target.write_text("synthetic", encoding="utf8")
+        external_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(external_tmp.cleanup)
+        external = Path(external_tmp.name)
         alias = selected / "alias"
-        alias.symlink_to(inside, target_is_directory=True)
+        alias.symlink_to(external, target_is_directory=True)
         self.bot.sessions.change(scope(101, 202, 71), started=True, cwd="work")
 
-        rejected = (
-            ("/ls ..", "parent-directory traversal"),
-            ("/ls ../sibling", "parent-directory traversal"),
-            ("/ls " + str(sibling), "current Topic CWD"),
-            ("/ls missing", "does not exist"),
-            ("/ls result.txt", "not a directory"),
-            ("/ls alias", "symbolic links"),
+        accepted = (
+            ("/ls ..", self.bot.settings.workspace),
+            ("/ls ../sibling", sibling),
+            ("/ls " + str(sibling), sibling),
+            ("/ls " + str(external), external),
+            ("/ls alias", external),
         )
         with patch("bot.subprocess.run") as run:
-            for command, reason in rejected:
+            run.return_value.returncode = 0
+            run.return_value.stdout = "synthetic listing\n"
+            for command, target in accepted:
+                self.bot.handle_update(update(command, topic=71))
+                self.assertEqual(run.call_args.args[0],
+                                 ["ls", "-l", "--", str(target.resolve())])
+                self.assertEqual(run.call_args.kwargs["cwd"], str(target.resolve()))
+
+        with patch("bot.subprocess.run") as run:
+            for command, reason in (("/ls missing", "does not exist"),
+                                    ("/ls result.txt", "not a directory")):
                 self.bot.handle_update(update(command, topic=71))
                 self.assertIn("Path rejected", self.api.sent[-1][1])
                 self.assertIn(reason, self.api.sent[-1][1])
                 self.assertIn("Re-enter /ls [PATH]", self.api.sent[-1][1])
             run.assert_not_called()
 
-    def test_ls_rejects_unsafe_child_permissions(self):
-        unsafe = self.bot.settings.workspace / "unsafe-listing"
-        unsafe.mkdir(mode=0o700)
-        unsafe.chmod(0o722)
-        self.addCleanup(unsafe.chmod, 0o700)
+    def test_ls_allows_os_readable_directory_regardless_of_write_mode(self):
+        readable = self.bot.settings.workspace / "readable-listing"
+        readable.mkdir(mode=0o755)
         with patch("bot.subprocess.run") as run:
-            self.bot.handle_update(update("/ls unsafe-listing"))
+            run.return_value.returncode = 0
+            run.return_value.stdout = "synthetic listing\n"
+            self.bot.handle_update(update("/ls readable-listing"))
+        run.assert_called_once()
+
+    def test_ls_rejects_directory_without_os_read_or_search_permission(self):
+        inaccessible = self.bot.settings.workspace / "inaccessible-listing"
+        inaccessible.mkdir(mode=0o700)
+        with (patch("workspace_policy.os.access", side_effect=[True, False]),
+              patch("bot.subprocess.run") as run):
+            self.bot.handle_update(update("/ls inaccessible-listing"))
         run.assert_not_called()
-        self.assertIn("unsafe group or public write permission", self.api.sent[-1][1])
+        self.assertIn("lacks permission", self.api.sent[-1][1])
 
     def test_ls_timeout_failure_and_output_bound(self):
         import subprocess

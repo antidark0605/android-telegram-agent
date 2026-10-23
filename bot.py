@@ -363,7 +363,7 @@ class TelegramAgyBot:
                        "/model: choose an explicit model\n"
                        "/format: choose rich/classic/raw reply display\n"
                        "/last: manually resend the last saved reply\n"
-                       "/ls [PATH]: list the Topic CWD or one of its subdirectories (ls -l)\n"
+                       "/ls [PATH]: list any directory accessible to the Bot user (ls -l)\n"
                        "/status, /context, /quota: show status\n"
                        "Tap 🛑 中斷 (Stop) to interrupt running tasks.\n"
                        "No collaboration or kanban.", thread)
@@ -459,8 +459,7 @@ class TelegramAgyBot:
         elif cmd == "/ls":
             try:
                 cwd = self._workspace(self.sessions.get(key))
-                target = resolve_list_directory(
-                    self.settings.workspace, cwd, arg.strip() or None)
+                target = resolve_list_directory(cwd, arg.strip() or None)
             except WorkspaceError as exc:
                 self._send(chat_id, f"Path rejected: {exc} Re-enter /ls [PATH].", thread)
             else:

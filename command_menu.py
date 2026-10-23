@@ -11,7 +11,7 @@ BOT_COMMANDS: tuple[tuple[str, str], ...] = (
     ("model", "Choose an explicit AGY model"),
     ("format", "Choose rich, classic or raw replies"),
     ("last", "Resend this topic's last saved reply"),
-    ("ls", "List Topic files: /ls [PATH]"),
+    ("ls", "List an accessible directory: /ls [PATH]"),
     ("status", "Show session and task status"),
     ("context", "Show last task token accounting"),
     ("quota", "Show AGY usage limits when available"),

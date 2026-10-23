@@ -122,21 +122,40 @@ def resolve_or_create_workspace(root: Path,
     return resolve_workspace(configured, str(candidate))
 
 
-def resolve_list_directory(root: Path, workspace: Path,
-                           requested: str | None = None) -> Path:
-    """Resolve an ``/ls`` target inside the current Topic workspace.
+def resolve_list_directory(workspace: Path, requested: str | None = None) -> Path:
+    """Resolve an accessible ``/ls`` directory from the current Topic CWD.
 
-    The current workspace and target both pass the normal ownership, mode and
-    symlink checks. Relative targets start at the current Topic CWD; absolute
-    targets are accepted only when they remain below that same CWD.
+    Relative targets start at the current Topic CWD. Absolute paths, parent
+    traversal and symlinks are allowed for this read-only command; the resolved
+    target must exist, be a directory and be readable/searchable by the Bot's
+    operating-system user. Session and artifact paths use stricter resolvers.
     """
-    current, _relative = resolve_workspace(root, str(workspace))
+    try:
+        current = workspace.resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise WorkspaceError("Current Topic CWD does not exist or cannot be accessed.") from None
     value = (requested or ".").strip()
     if (len(value) >= 2 and value[0] == value[-1]
             and value[0] in {"'", '"'}):
         value = value[1:-1].strip()
-    candidate = Path(value) if Path(value).is_absolute() else current / value
-    target, _relative = resolve_workspace(root, str(candidate))
-    if not target.is_relative_to(current):
-        raise WorkspaceError("Path must stay inside the current Topic CWD.")
+    if (not value or len(value) > 512
+            or any(ord(character) < 32 or ord(character) == 127
+                   for character in value)):
+        raise WorkspaceError("Path is empty or invalid.")
+    try:
+        raw = Path(value).expanduser()
+    except RuntimeError:
+        raise WorkspaceError("Path cannot be expanded for the Bot user.") from None
+    candidate = raw if raw.is_absolute() else current / raw
+    try:
+        target = candidate.resolve(strict=True)
+        info = target.stat()
+    except PermissionError:
+        raise WorkspaceError("The Bot lacks permission to access this path.") from None
+    except (OSError, RuntimeError):
+        raise WorkspaceError("Path does not exist or cannot be accessed.") from None
+    if not stat.S_ISDIR(info.st_mode):
+        raise WorkspaceError("Path is not a directory.")
+    if not os.access(target, os.R_OK | os.X_OK):
+        raise WorkspaceError("The Bot lacks permission to read or search this directory.")
     return target
