@@ -1081,6 +1081,29 @@ class BotTests(unittest.TestCase):
         self.assertNotIn("123456", markdown)
         self.assertEqual(self.bot.quota.get.call_count, 1)
 
+    def test_reply_uses_argon_native_weekly_quota(self):
+        from datetime import datetime, timezone
+        data = {
+            "gemini-weekly": {
+                "left": 70.0,
+                "reset": datetime(2030, 1, 2, 3, 4, tzinfo=timezone.utc),
+            },
+            "argon-weekly": {
+                "left": 55.7590663433075,
+                "reset": datetime(2030, 1, 3, 3, 4, tzinfo=timezone.utc),
+            },
+        }
+        self.bot.quota.get.return_value = (data, None, False)
+        self.run_task(AgentResult(True, "Argon result", None, {}),
+                      model="gemini-4-argon-high")
+        markdown = self.api.rich_sent[-1][1]
+        self.assertIn("> 5h: N/A", markdown)
+        self.assertIn("> Weekly: 44.24% used · 55.76% left", markdown)
+        self.assertIn("resets 01/03 11:04", markdown)
+        self.assertNotIn("30.0% used", markdown)
+        self.assertIn("> Context: unavailable", markdown)
+        self.assertEqual(self.bot.quota.get.call_count, 1)
+
     def test_cancelled_and_failed_tasks_clear_stop_without_delivering(self):
         for cancelled, label in [(True, "已取消"), (False, "失敗")]:
             self.api.edits.clear()

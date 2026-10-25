@@ -1,6 +1,6 @@
 """Map Bot state onto the vendored telegram-agent-ui presentation library.
 
-Revision: 2 — 2026-10-18. Pure mapping only: quota collection, task control
+Revision: 3 — 2026-10-25. Pure mapping only: quota collection, task control
 and Telegram transport stay in their existing modules.
 """
 from __future__ import annotations
@@ -23,6 +23,8 @@ DISPLAY_LABELS = {"rich": "Rich（結構化）", "classic": "Classic（純文字
 # Quota rows keep the established one-decimal format without a UTC offset.
 PROFILE = DisplayProfile(fields=("model",), quota_precision=1,
                          show_reset_offset=False)
+ARGON_PROFILE = DisplayProfile(fields=("model",), quota_precision=2,
+                               show_reset_offset=False)
 UPSTREAM_CANCEL = "task:cancel:"
 # Bot-only states layered on upstream ones; neither claims completion.
 DELIVERING_ACTIVITY = "📤 Delivering answer"
@@ -69,9 +71,12 @@ def directory_listing_messages(path: str, body: str) -> list[tuple[str, str]]:
 
 
 def _family(model) -> str | None:
-    if isinstance(model, str) and model.startswith("gemini-"):
+    value = model.lower() if isinstance(model, str) else ""
+    if "argon" in value:
+        return "argon"
+    if "gemini" in value:
         return "gemini"
-    if isinstance(model, str) and model.startswith(("claude-", "gpt-")):
+    if "claude" in value or "gpt" in value:
         return "3p"
     return None
 
@@ -80,9 +85,23 @@ def _window(row) -> QuotaWindow | None:
     if not isinstance(row, dict):
         return None
     try:
-        return QuotaWindow(row["left"], row["reset"].astimezone(LOCAL_TIMEZONE))
+        reset = row.get("reset")
+        if reset is not None:
+            reset = reset.astimezone(LOCAL_TIMEZONE)
+        return QuotaWindow(row["left"], reset)
     except (KeyError, AttributeError, TypeError, ValueError, OverflowError):
         return None
+
+
+def _profile(model) -> DisplayProfile:
+    return ARGON_PROFILE if _family(model) == "argon" else PROFILE
+
+
+def _explicit_not_applicable(text: str, model) -> str:
+    if _family(model) != "argon":
+        return text
+    return "\n".join("> 5h: N/A" if line == "> 5h: unavailable" else line
+                     for line in text.split("\n"))
 
 
 def usage_view(model, data, cached=False) -> UsageView:
@@ -95,6 +114,12 @@ def usage_view(model, data, cached=False) -> UsageView:
                      cached=cached is True)
 
 
+def usage_markdown(model, data, cached=False) -> str:
+    """Render one model-scoped usage footer with explicit provider N/A states."""
+    return _explicit_not_applicable(
+        render_usage(usage_view(model, data, cached), profile=_profile(model)), model)
+
+
 def reply_markdown(body: str, model, data, cached=False) -> str:
     """Header with the task's own model, the untouched body, then Usage."""
     usage = usage_view(model, data, cached)
@@ -103,12 +128,12 @@ def reply_markdown(body: str, model, data, cached=False) -> str:
                          body, usage)
     except ValueError:
         view = ReplyView(AGENT, "unavailable", body, usage)
-    return render_reply(view, profile=PROFILE)
+    return _explicit_not_applicable(render_reply(view, profile=_profile(model)), model)
 
 
 def usage_plain(model, data, cached=False) -> str:
     """Usage rows for the plain /quota reply, without quote markers."""
-    text = render_usage(usage_view(model, data, cached), profile=PROFILE)
+    text = usage_markdown(model, data, cached)
     return "\n".join(line.removeprefix("> ") for line in text.splitlines()
                      if line != ">")
 
