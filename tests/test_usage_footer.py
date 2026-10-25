@@ -7,14 +7,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 from usage_footer import QuotaService, parse_quota
-from presentation import (PROFILE, directory_listing_messages,
-                          progress_message, reply_markdown, stop_markup,
-                          usage_plain, usage_view)
-from vendor.telegram_ui import render_usage
+from presentation import (directory_listing_messages, progress_message,
+                          reply_markdown, stop_markup,
+                          usage_markdown, usage_plain, usage_view)
 
 
 def format_usage(model, data, at=None, cached=False):
-    return render_usage(usage_view(model, data, cached), profile=PROFILE)
+    return usage_markdown(model, data, cached)
 
 
 def decorate_reply(text, model, data, at=None, cached=False):
@@ -22,13 +21,28 @@ def decorate_reply(text, model, data, at=None, cached=False):
 
 
 def fixture():
-    return {'status':'SUCCESS', 'command':{'name':'usage', 'data':{'groups':[
-        {'buckets':[{'id':bid, 'window':window, 'remaining_fraction':fraction,
+    return {'status':'SUCCESS', 'num_turns':0,
+            'command':{'name':'usage', 'data':{'groups':[
+        {'name':'Gemini models',
+         'buckets':[{'id':bid, 'window':window, 'remaining_fraction':fraction,
                      'reset_time':'2030-01-02T03:04:05Z'}
                     for bid,window,fraction in [('gemini-5h','5h',.8),
-                                                ('gemini-weekly','weekly',.7),
-                                                ('3p-5h','5h',.2),
+                                                ('gemini-weekly','weekly',.7)]]},
+        {'name':'Claude and GPT models',
+         'buckets':[{'id':bid, 'window':window, 'remaining_fraction':fraction,
+                     'reset_time':'2030-01-02T03:04:05Z'}
+                    for bid,window,fraction in [('3p-5h','5h',.2),
                                                 ('3p-weekly','weekly',.1)]]}]}}}
+
+
+def argon_fixture():
+    document=fixture()
+    document['command']['data']['groups'].append({
+        'name':'Gemini 4 Argon',
+        'buckets':[{'id':'argon-weekly','window':'weekly',
+                    'remaining_fraction':0.557590663433075,
+                    'reset_time':'2030-01-03T03:04:05Z'}]})
+    return document
 
 
 class UsageTests(unittest.TestCase):
@@ -46,8 +60,36 @@ class UsageTests(unittest.TestCase):
         self.assertIn('Context: unavailable',g)
         self.assertIn('5h: unavailable',format_usage('unknown',data,at))
 
+    def test_argon_uses_own_weekly_group_and_explicit_na(self):
+        data=parse_quota(argon_fixture())
+        footer=format_usage('gemini-4-argon-high',data)
+        self.assertIn('Context: unavailable',footer)
+        self.assertIn('5h: N/A',footer)
+        self.assertIn('Weekly: 44.24% used · 55.76% left',footer)
+        self.assertIn('01/03 11:04',footer)
+        self.assertNotIn('30.0% used',footer)
+        display=format_usage('Gemini 4 Argon (Medium)',data)
+        self.assertIn('44.24% used',display)
+        self.assertIn('5h: N/A',display)
+
+    def test_argon_missing_group_never_substitutes_gemini(self):
+        data=parse_quota(fixture())
+        footer=format_usage('gemini-4-argon-low',data)
+        self.assertIn('5h: N/A',footer)
+        self.assertIn('Weekly: unavailable',footer)
+        self.assertNotIn('30.0% used',footer)
+
+    def test_headless_usage_requires_zero_turn_and_named_family(self):
+        for update in ({'num_turns':1},{'num_turns':False},{'status':'ERROR'},
+                       {'command':{'name':'other','data':{'groups':[]}}}):
+            self.assertEqual(parse_quota({**argon_fixture(),**update}),{})
+        unnamed=argon_fixture()
+        for group in unnamed['command']['data']['groups']:
+            group.pop('name')
+        self.assertEqual(parse_quota(unnamed),{})
+
     def test_unknown_failed_denied_or_model_prose_not_trusted(self):
-        for doc in [None,{}, {'status':'SUCCESS','response':'99% remaining'},
+        for doc in [None,{}, {'status':'SUCCESS','num_turns':0,'response':'99% remaining'},
                     {**fixture(),'error':'secret'}, {**fixture(),'denied_actions':[1]},
                     {**fixture(),'status':'ERROR'},
                     {'status':'SUCCESS','command':{'name':'other','data':fixture()['command']['data']}}]:
@@ -57,14 +99,23 @@ class UsageTests(unittest.TestCase):
         for value in [True,'80%',-1,1.1,float('nan'),float('inf'),10**1000]:
             doc=fixture();doc['command']['data']['groups'][0]['buckets'][0]['remaining_fraction']=value
             self.assertNotIn('gemini-5h',parse_quota(doc))
-        for field,value in [('id',[]),('window','weekly'),('reset_time','invalid'),
-                            ('reset_time','2030-01-01T00:00:00'),
-                            ('reset_time','0001-01-01T00:00:00+23:00'),
-                            ('reset_time','9999-12-31T23:59:59-23:00')]:
+        for field,value in [('window','unknown')]:
             doc=fixture();doc['command']['data']['groups'][0]['buckets'][0][field]=value
             self.assertNotIn('gemini-5h',parse_quota(doc))
         doc=fixture();b=doc['command']['data']['groups'][0]['buckets'];b.append(dict(b[0]))
         self.assertEqual(parse_quota(doc),{})
+
+    def test_missing_or_invalid_reset_keeps_verified_fraction(self):
+        for reset in (None, "invalid", "2030-01-01T00:00:00"):
+            doc=argon_fixture()
+            bucket=doc['command']['data']['groups'][-1]['buckets'][0]
+            if reset is None:
+                bucket.pop('reset_time')
+            else:
+                bucket['reset_time']=reset
+            footer=format_usage('gemini-4-argon-high',parse_quota(doc))
+            self.assertIn('Weekly: 44.24% used · 55.76% left',footer)
+            self.assertNotIn('resets',footer)
 
     def test_cache_expiry_failure_does_not_reuse_stale_data(self):
         svc=QuotaService('synthetic-agy',Path('/synthetic'))

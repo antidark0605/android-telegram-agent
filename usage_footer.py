@@ -10,10 +10,45 @@ from datetime import datetime, timedelta, timezone
 
 LOCAL_TIMEZONE = timezone(timedelta(hours=8))
 CACHE_SECONDS = 60
+GROUP_FAMILIES = {
+    'gemini models': 'gemini',
+    'gemini': 'gemini',
+    'claude and gpt models': '3p',
+    'claude and gpt': '3p',
+    'gemini 4 argon': 'argon',
+}
+WINDOWS = {'5h': '5h', 'weekly': 'weekly'}
+
+
+def _reset_time(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        if parsed.tzinfo is None or parsed.timestamp() < 0:
+            return None
+        return parsed.astimezone(LOCAL_TIMEZONE)
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def _quota_row(bucket: object) -> tuple[str, dict] | None:
+    if not isinstance(bucket, dict):
+        return None
+    window = bucket.get('window')
+    key = WINDOWS.get(window) if isinstance(window, str) else None
+    fraction = bucket.get('remaining_fraction')
+    if (key is None or type(fraction) not in (int, float)
+            or not 0 <= fraction <= 1 or not math.isfinite(fraction)):
+        return None
+    return key, {'left': fraction * 100,
+                 'reset': _reset_time(bucket.get('reset_time'))}
 
 
 def parse_quota(document: object) -> dict:
     if not isinstance(document, dict) or document.get('status') != 'SUCCESS':
+        return {}
+    if type(document.get('num_turns')) is not int or document['num_turns'] != 0:
         return {}
     if any(document.get(k) for k in ('error', 'is_error', 'denied_actions', 'permission_denials')):
         return {}
@@ -24,34 +59,27 @@ def parse_quota(document: object) -> dict:
     groups = data.get('groups') if isinstance(data, dict) else None
     if not isinstance(groups, list):
         return {}
-    found = {}
+    found: dict[str, dict] = {}
+    recognized_group = False
     for group in groups:
-        buckets = group.get('buckets') if isinstance(group, dict) else None
-        if not isinstance(buckets, list):
+        if not isinstance(group, dict):
             continue
+        name = group.get('name')
+        family = GROUP_FAMILIES.get(name.strip().lower()) if isinstance(name, str) else None
+        buckets = group.get('buckets')
+        if family is None or not isinstance(buckets, list):
+            continue
+        recognized_group = True
         for bucket in buckets:
-            if not isinstance(bucket, dict):
+            row = _quota_row(bucket)
+            if row is None:
                 continue
-            bid = bucket.get('id')
-            expected = {'gemini-5h': '5h', 'gemini-weekly': 'weekly',
-                        '3p-5h': '5h', '3p-weekly': 'weekly'}
-            if not isinstance(bid, str) or bid not in expected or bucket.get('window') != expected[bid]:
-                continue
-            fraction = bucket.get('remaining_fraction')
-            if type(fraction) not in (int, float) or not 0 <= fraction <= 1 or not math.isfinite(fraction):
-                continue
-            reset = bucket.get('reset_time')
-            try:
-                at = datetime.fromisoformat(reset.replace('Z', '+00:00')) if isinstance(reset, str) else None
-                if at is None or at.tzinfo is None:
-                    continue
-                at = at.astimezone(LOCAL_TIMEZONE)
-            except (ValueError, OverflowError):
-                continue
-            if bid in found:  # Ambiguous duplicate data fails closed.
+            window, value = row
+            key = f'{family}-{window}'
+            if key in found:  # Ambiguous duplicate family/window fails closed.
                 return {}
-            found[bid] = {'left': fraction * 100, 'reset': at}
-    return found
+            found[key] = value
+    return found if recognized_group else {}
 
 
 class QuotaService:
