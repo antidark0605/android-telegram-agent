@@ -1,6 +1,6 @@
 # android-telegram-agent
 
-Revision: 14 — 2026-10-25
+Revision: 15 — 2026-11-09
 
 Small non-root **Termux + Telegram + official AGY CLI** Bot for Android. Original Python standard-library code, not a port of another private codebase. No root, inbound ports, OpenClaw, collaboration, kanban, server framework, or pip dependencies.
 
@@ -150,8 +150,11 @@ python bot.py --config "$HOME/.config/android-telegram-agent/config.json"
 ```
 
 For a repeatable home-device installation, pinned upgrades, rollback, safe doctor
-output and a `termux-services` template, follow
-[`docs/service-setup.md`](docs/service-setup.md). The release tools never copy or
+output, a `termux-services` template and **Termux:Boot auto-start setup**, follow
+[`docs/service-setup.md`](docs/service-setup.md). The optional
+`python scripts/setup-termux-boot.py --check` performs read-only boot-readiness
+checks; `--install` creates only one private boot script and never installs APKs,
+restarts the Bot or reboots the device. The release tools never copy or
 modify private config, workspace, credentials or session state, and never restart a
 service automatically.
 
