@@ -1,6 +1,6 @@
 # Termux 版本化部署與常駐服務
 
-Revision: 2 — 2026-10-22
+Revision: 3 — 2026-11-09
 
 本文件適用於非 root Termux。私人 config、Token、AGY 登入資料與 workspace
 不得放入 Git checkout 或 release 目錄。先依
@@ -116,12 +116,57 @@ sv status android-telegram-agent
 android-telegram-agent` 載入新版本，並執行 doctor、`/status` 與真實往返驗收。
 不要同時保留舊的 shell、nohup、tmux 或其他 service poller。
 
-## 開機啟動
+## 開機啟動：Termux:Boot → termux-services → Bot
 
-需要重開機自動啟動時才安裝 Termux:Boot；Termux 與所有 plugin 必須來自相同簽章
-來源。依官方方式先手動開啟 Termux:Boot 一次，再讓 boot script 載入
-`$PREFIX/etc/profile.d/start-services.sh`。是否使用 wake lock 取決於裝置實測；它會增加
-耗電，不列為 installer 預設。
+前述 `sv-enable` 只決定 runit 管理程序**啟動後**是否執行 Bot，並不會自動接收
+Android 的開機事件。開機鏈需要另行設定 Termux:Boot，不能只靠 `service/run`。
+
+**安裝前提（須由裝置操作者核對）：**
+
+1. 確認既有 Termux APK 的來源與簽章。從**相同簽章來源**取得相容的
+   [Termux:Boot](https://github.com/termux/termux-boot)，由操作者自行安裝，
+   **手動開啟 Termux:Boot App 一次**。本 repo 不附 APK，也不自動安裝或替換 App。
+2. `termux-services` 已安裝，`$PREFIX/etc/profile.d/start-services.sh` 存在，
+   `android-telegram-agent` 的 `run` 檔可執行，且服務沒有 `down` 停用檔。
+3. 確認沒有另一套 shell、nohup、tmux、boot script 或 service 同時以同一
+   Telegram Bot Token 運作；若已存在其他開機腳本，先人工檢查，**不得重複啟動 Bot**。
+
+在**非 root Termux shell**、已核准的程式 checkout 中執行：
+
+```sh
+# 唯讀檢查：缺少 App、Service 或腳本時會顯示 *_MISSING，exit 1。
+python scripts/setup-termux-boot.py --check
+
+# 前述條件已確認後，由操作者明確要求建立開機腳本：
+python scripts/setup-termux-boot.py --install
+
+# 驗證腳本已建立且與受測版本內容一致：
+python scripts/setup-termux-boot.py --check
+```
+
+此工具只建立一份私人的、可執行的
+`$HOME/.termux/boot/10-start-services`，由 Termux:Boot 在下次啟動時載入
+`$PREFIX/etc/profile.d/start-services.sh`，讓既有 runit 管理程序啟動。
+它不執行 `sv up`、不呼叫 AGY、不開第二個 Telegram polling 程序、不更改 Bot 設定、
+不安裝 APK，也**不主動重開裝置**。再次安裝相同版本為 no-op；遇到同名檔案、
+Symbolic Link、不安全目錄權限，或偵測到另一份 Bot／service 啟動腳本時拒絕覆寫。
+
+`--check` 只代表**靜態前提與腳本就緒**，無法確認 App 曾被手動開啟、Android
+是否交付 `BOOT_COMPLETED`、是否有電池背景限制，也不代表真正 reboot 已驗證。
+目前程式不預設取得 wake lock，以免增加耗電。
+
+**Local Agent 實機驗收（結果保存在私人紀錄）：**
+
+1. 開機前記錄目前 service、單一 Bot PID、release marker 與啟動設定；只有明確
+   授權且沒有執行中任務時才執行 reboot。
+2. 重開後**先不手動開啟 Termux**，確認 boot ID 改變、`sys.boot_completed=1`、
+   runsvdir 已啟動、Bot 僅一個非 root 程序、版本正確且事件中有 `poll_ok`。
+3. 在 Telegram 實際輸入 `/status`，確認由原 Chat／Topic 收到 Bot 回覆。
+4. 若只有人工開 Termux 後才恢復，記錄為 Boot 啟動鏈 FAIL；不能當修復 PASS。
+   另測正常關閉畫面後的持續運作及 service 意外退出後的重啟能力。
+
+原始 log、使用者識別、裝置名稱、路徑、Token、認證資料不可貼入公開 PR。
+若尚未做過真人 Telegram 驗收，請標示 `NOT VERIFIED`。
 
 來源：
 
