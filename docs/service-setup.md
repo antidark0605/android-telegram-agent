@@ -1,6 +1,6 @@
 # Termux 版本化部署與常駐服務
 
-Revision: 3 — 2026-11-09
+Revision: 4 — 2026-11-09
 
 本文件適用於非 root Termux。私人 config、Token、AGY 登入資料與 workspace
 不得放入 Git checkout 或 release 目錄。先依
@@ -150,6 +150,8 @@ python scripts/setup-termux-boot.py --check
 它不執行 `sv up`、不呼叫 AGY、不開第二個 Telegram polling 程序、不更改 Bot 設定、
 不安裝 APK，也**不主動重開裝置**。再次安裝相同版本為 no-op；遇到同名檔案、
 Symbolic Link、不安全目錄權限，或偵測到另一份 Bot／service 啟動腳本時拒絕覆寫。
+檢查包含隱藏開機腳本。安裝暫存檔放在 boot 目錄外，避免中斷後留下另一份可執行腳本。
+檔案系統錯誤只輸出固定訊息，不包含私人路徑。
 
 `--check` 只代表**靜態前提與腳本就緒**，無法確認 App 曾被手動開啟、Android
 是否交付 `BOOT_COMPLETED`、是否有電池背景限制，也不代表真正 reboot 已驗證。

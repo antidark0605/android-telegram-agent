@@ -93,7 +93,8 @@ def _other_startup_script(boot_dir: Path, managed: Path) -> bool:
     if not boot_dir.is_dir():
         return False
     for path in boot_dir.iterdir():
-        if path == managed or path.name.startswith('.'):
+        # Termux:Boot enumerates hidden regular files too.
+        if path == managed:
             continue
         if path.is_symlink():
             raise SetupError('An existing boot script is a symlink; inspect it manually.')
@@ -154,7 +155,9 @@ def install(home: Path, prefix: Path, *, installed: bool) -> dict[str, bool]:
         return inspect(home, prefix, installed=installed)
     if _other_startup_script(boot_dir, target):
         raise SetupError('Another boot script already starts the Bot or services.')
-    fd, temporary = tempfile.mkstemp(prefix='.start-', dir=boot_dir)
+    # Keep staging outside the boot directory: even hidden files there can
+    # execute at boot, including leftovers from an interrupted installation.
+    fd, temporary = tempfile.mkstemp(prefix='.start-', dir=termux_dir)
     try:
         os.fchmod(fd, 0o700)
         with os.fdopen(fd, 'wb') as output:
@@ -186,9 +189,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         statuses = (install if args.install else inspect)(
             TERMUX_HOME, TERMUX_PREFIX, installed=boot_app_installed())
-    except (SetupError, OSError) as exc:
-        # Exception texts describe only generic conditions, never private paths.
+    except SetupError as exc:
+        # SetupError messages are controlled, generic conditions.
         print('BOOT_SETUP_FAILED:', exc)
+        return 1
+    except OSError:
+        # Filesystem exceptions can contain private filenames or paths.
+        print('BOOT_SETUP_FAILED: Cannot access boot setup files.')
         return 1
     for label, ready in statuses.items():
         print(label + ('_OK' if ready else '_MISSING'))

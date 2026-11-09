@@ -1,5 +1,8 @@
 """Synthetic, read-only and isolated tests for the optional boot installer."""
+import contextlib
+import errno
 import importlib.util
+import io
 import os
 import stat
 import tempfile
@@ -101,6 +104,93 @@ class BootSetupTests(unittest.TestCase):
         with patch.object(boot.os, 'getuid', return_value=os.getuid()):
             with self.assertRaises(boot.SetupError):
                 boot.install(self.home, self.prefix, installed=True)
+
+    def test_hidden_starters_and_old_temporary_hooks_block_install(self):
+        termux_dir = self.home / '.termux'
+        termux_dir.mkdir(mode=0o700)
+        boot_dir = termux_dir / 'boot'
+        boot_dir.mkdir(mode=0o700)
+        for name in ('.existing-starter', '.start-interrupted'):
+            with self.subTest(name=name):
+                existing = boot_dir / name
+                existing.write_text(boot.BOOT_SCRIPT)
+                # Termux:Boot also makes non-executable regular files executable.
+                existing.chmod(0o600)
+                with self.assertRaisesRegex(boot.SetupError, 'NO_DUPLICATE_STARTER'):
+                    boot.install(self.home, self.prefix, installed=True)
+                self.assertFalse((boot_dir / boot.SCRIPT_NAME).exists())
+                self.assertEqual(existing.read_text(), boot.BOOT_SCRIPT)
+                existing.unlink()
+
+    def test_hidden_symlink_is_not_ignored(self):
+        termux_dir = self.home / '.termux'
+        termux_dir.mkdir(mode=0o700)
+        boot_dir = termux_dir / 'boot'
+        boot_dir.mkdir(mode=0o700)
+        (boot_dir / '.existing-starter').symlink_to(self.prefix)
+        with self.assertRaisesRegex(boot.SetupError, 'symlink'):
+            boot.install(self.home, self.prefix, installed=True)
+        self.assertFalse((boot_dir / boot.SCRIPT_NAME).exists())
+
+    def test_staging_never_appears_in_boot_consumer_directory(self):
+        real_link = os.link
+        observed = []
+
+        def publish(source, target):
+            source, target = Path(source), Path(target)
+            observed.append(source)
+            self.assertEqual(source.parent, self.home / '.termux')
+            self.assertEqual(source.read_text(), boot.BOOT_SCRIPT)
+            self.assertEqual(list(target.parent.iterdir()), [])
+            return real_link(source, target)
+
+        with patch.object(boot.os, 'link', side_effect=publish):
+            status = boot.install(self.home, self.prefix, installed=True)
+        self.assertTrue(all(status.values()))
+        self.assertEqual(len(observed), 1)
+        self.assertFalse(observed[0].exists())
+        self.assertEqual([p.name for p in (self.home / '.termux/boot').iterdir()],
+                         [boot.SCRIPT_NAME])
+
+    def test_cli_filesystem_errors_never_print_private_paths(self):
+        # Exercise the actual installation failure sites, not only a stubbed
+        # install() exception. Each stage must reach the same safe CLI boundary.
+        for stage in ('mkstemp', 'link', 'unlink', 'iterdir', 'mkdir'):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as tmp:
+                home = Path(tmp) / 'home'
+                home.mkdir(mode=0o700)
+                termux_dir = home / '.termux'
+                termux_dir.mkdir(mode=0o700)
+                boot_dir = termux_dir / 'boot'
+                if stage != 'mkdir':
+                    boot_dir.mkdir(mode=0o700)
+                error = PermissionError(errno.EACCES, 'Permission denied',
+                                        '/synthetic/private-location/boot')
+                target = {'mkstemp': boot.tempfile, 'link': boot.os,
+                          'unlink': boot.os, 'iterdir': boot.Path,
+                          'mkdir': boot.Path}[stage]
+                output = io.StringIO()
+                with (patch.object(boot, 'TERMUX_HOME', home),
+                      patch.object(boot, 'TERMUX_PREFIX', self.prefix),
+                      patch.object(boot.Path, 'home', return_value=home),
+                      patch.dict(os.environ, {'PREFIX': str(self.prefix)}),
+                      patch.object(boot, 'boot_app_installed', return_value=True),
+                      patch.object(target, stage, side_effect=error),
+                      contextlib.redirect_stdout(output)):
+                    result = boot.main(['--install'])
+                self.assertEqual(result, 1)
+                self.assertEqual(output.getvalue(),
+                                 'BOOT_SETUP_FAILED: Cannot access boot setup files.\n')
+                self.assertNotIn('/synthetic/', output.getvalue())
+                self.assertNotIn(str(home), output.getvalue())
+                # A cleanup error can occur after atomic publication. The next
+                # invocation must still recognize the hook without overwriting it.
+                if stage == 'unlink':
+                    hook = boot_dir / boot.SCRIPT_NAME
+                    inode = hook.stat().st_ino
+                    self.assertTrue(all(boot.install(
+                        home, self.prefix, installed=True).values()))
+                    self.assertEqual(hook.stat().st_ino, inode)
 
     def test_read_only_check_does_not_create_dirs(self):
         with patch.object(boot.os, 'getuid', return_value=os.getuid()):
