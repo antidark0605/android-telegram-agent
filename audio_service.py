@@ -2,6 +2,7 @@
 import subprocess
 import threading
 import time
+from telegram_api import TelegramError
 from pathlib import Path
 from voice_handler import download_voice
 
@@ -46,6 +47,7 @@ class AudioService:
     def _run(argv, timeout, input_text=None):
         try:
             result = subprocess.run(argv, input=input_text,
+                                    stdin=subprocess.DEVNULL if input_text is None else None,
                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                     text=True, encoding="utf8", errors="replace",
                                     timeout=timeout, check=False)
@@ -111,7 +113,7 @@ class AudioService:
                 else:
                     self._speak(data, generation)
                 ok = True
-            except (ValueError, OSError, KeyError, TypeError):
+            except (ValueError, OSError, KeyError, TypeError, TelegramError):
                 pass
             finally:
                 if callback is not None:
