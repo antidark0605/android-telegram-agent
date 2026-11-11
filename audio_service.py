@@ -45,7 +45,7 @@ class AudioService:
     @staticmethod
     def _run(argv, timeout, input_text=None):
         try:
-            result = subprocess.run(argv, input=input_text, stdin=subprocess.PIPE,
+            result = subprocess.run(argv, input=input_text,
                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                     text=True, encoding="utf8", errors="replace",
                                     timeout=timeout, check=False)
