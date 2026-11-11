@@ -5,6 +5,7 @@ This tool never installs APKs, starts services, changes config or invokes AGY.
 from __future__ import annotations
 
 import argparse
+import errno
 import os
 import stat
 import subprocess
@@ -30,6 +31,48 @@ START_MARKERS = (b'start-services.sh', b'service-daemon start',
 
 class SetupError(ValueError):
     """A prerequisite is missing or an existing user file would be changed."""
+
+
+def _publish_no_replace(source: str, target: Path) -> None:
+    """Publish on the same filesystem without replacing any existing entry."""
+    link = getattr(os, 'link', None)
+    if callable(link):
+        link(source, target)
+        return
+    # Termux's Python build disables link/linkat. Never emulate this with
+    # exists()+rename(): that would overwrite a concurrently created hook.
+    try:
+        import ctypes
+        library = ctypes.CDLL(None, use_errno=True)
+    except (ImportError, AttributeError, OSError):
+        raise SetupError('Atomic no-replace publication is unavailable.') from None
+    arguments = (-100, os.fsencode(source), -100, os.fsencode(target), 1)
+    types = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+             ctypes.c_char_p, ctypes.c_uint)
+    rename = getattr(library, 'renameat2', None)
+    if rename is not None:
+        rename.argtypes = types
+        rename.restype = ctypes.c_int
+    else:
+        # Bionic exposes renameat2 only since API 30. For older ARM64
+        # Android, Linux UAPI defines __NR_renameat2=276 (asm-generic).
+        # Reject unknown ABIs rather than guessing syscall numbers.
+        if (sys.platform not in ('linux', 'android')
+                or os.uname().machine != 'aarch64'
+                or ctypes.sizeof(ctypes.c_void_p) != 8):
+            raise SetupError('Atomic no-replace publication is unavailable.')
+        rename = getattr(library, 'syscall', None)
+        if rename is None:
+            raise SetupError('Atomic no-replace publication is unavailable.')
+        rename.argtypes = (ctypes.c_long,) + types
+        rename.restype = ctypes.c_long
+        arguments = (276,) + arguments
+    # Linux/Android UAPI: AT_FDCWD=-100, RENAME_NOREPLACE=1.
+    if rename(*arguments) != 0:
+        code = ctypes.get_errno()
+        if code in (errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP):
+            raise SetupError('Atomic no-replace publication is unavailable.') from None
+        raise OSError(code, 'Cannot publish boot script.')
 
 
 def boot_app_installed() -> bool:
@@ -166,13 +209,17 @@ def install(home: Path, prefix: Path, *, installed: bool) -> dict[str, bool]:
             output.flush()
             os.fsync(output.fileno())
         try:
-            os.link(temporary, target)  # atomic publish; never overwrites target
+            _publish_no_replace(temporary, target)
         except FileExistsError:
             raise SetupError('Boot script appeared concurrently; not overwritten.') from None
     finally:
         if fd >= 0:
             os.close(fd)
-        os.unlink(temporary)
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            # renameat2 consumes the staging name on successful publication.
+            pass
     return inspect(home, prefix, installed=installed)
 
 
