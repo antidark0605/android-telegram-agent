@@ -10,6 +10,10 @@ Termux and service guides linked below.
 
 **Validation scope:** The basic Telegram ↔ AGY text round trip has been exercised in a non-root Termux environment. The integrated session, MCP and interactive controls require separate acceptance testing. Device-specific test environments, identifiers and results are intentionally kept outside this public repository.
 
+## Android Audio Routing (device acceptance pending)
+
+Voice messages and `/tts` output use the Android-selected media route (Speaker / Bluetooth / Headset), via operator-installed Termux:API. `/tts` enables a per-Topic mode, `/tts off` disables it, `/audio status|stop` manages the queue. This does not require an AGY model. Real audio routing is **NOT VERIFIED**. See [audio routing](docs/audio-routing.md).
+
 ## Telegram UX
 
 | Telegram input | Behavior |
