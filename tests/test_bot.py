@@ -1117,5 +1117,47 @@ class BotTests(unittest.TestCase):
             task.runner.cancel.assert_not_called()
 
 
+    def test_audio_voice_requires_allowlist_before_queue_or_download(self):
+        voice = {"file_id": "synthetic_id", "file_size": 400, "duration": 2,
+                 "mime_type": "audio/ogg"}
+        message = update("", user=999)
+        message["message"].pop("text")
+        message["message"]["voice"] = voice
+        with patch.object(self.bot.audio, "submit", return_value=True) as submit:
+            self.bot.handle_update(message)
+            submit.assert_not_called()
+            self.assertFalse(self.api.sent)
+            message["message"]["from"]["id"] = 101
+            self.bot.handle_update(message)
+            submit.assert_called_once()
+            self.assertEqual(submit.call_args.args[:2],
+                             ("voice", {"file_id": "synthetic_id",
+                                        "file_size": 400, "duration": 2}))
+        self.assertIn("Voice queued", self.api.sent[-1][1])
+
+    def test_tts_mode_is_per_topic_and_skips_agy(self):
+        from sessions import scope
+        with patch.object(self.bot.audio, "submit", return_value=True) as submit, patch(
+                "bot.AgyRunner") as runner:
+            self.bot.handle_update(update("/tts", topic=19))
+            self.assertTrue(self.bot.sessions.get(scope(101, 202, 19))["tts_enabled"])
+            self.bot.handle_update(update("讀出這段文字", topic=19))
+            submit.assert_called_once()
+            self.assertEqual(submit.call_args.args[:2], ("tts", "讀出這段文字"))
+            runner.assert_not_called()
+            self.bot.handle_update(update("/tts off", topic=19))
+            self.assertFalse(self.bot.sessions.get(scope(101, 202, 19))["tts_enabled"])
+            self.bot.handle_update(update("/tts status", topic=20))
+            self.assertIn("off", self.api.sent[-1][1])
+
+    def test_audio_commands_are_independent_of_agy(self):
+        with patch.object(self.bot.audio, "stop") as stop, patch.object(
+                self.bot.audio, "status", return_value="Audio: idle; queued: 0"):
+            self.bot.handle_update(update("/audio status"))
+            self.assertIn("queued: 0", self.api.sent[-1][1])
+            self.bot.handle_update(update("/audio stop"))
+            stop.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
