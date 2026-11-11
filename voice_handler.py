@@ -2,6 +2,7 @@
 import os
 import tempfile
 import urllib.parse
+import urllib.error
 import urllib.request
 from pathlib import Path
 from incoming_media import _valid_file_id, _remote_path, _check_folder
@@ -48,9 +49,11 @@ def download_voice(api, voice, private_dir: Path):
                         if size > LIMIT:
                             raise ValueError("Voice too large")
                         out.write(chunk)
-            except (OSError, TimeoutError):
+            except (OSError, TimeoutError, urllib.error.URLError):
                 raise TelegramError("Voice download failed", kind="transport") from None
-        if size != voice["file_size"] or saved.open("rb").read(4) != b"OggS":
+        with saved.open("rb") as stream:
+            ogg = stream.read(4) == b"OggS"
+        if size != voice["file_size"] or not ogg:
             raise ValueError("Invalid OGG voice data")
         return saved
     except Exception:
