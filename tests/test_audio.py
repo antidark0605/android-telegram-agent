@@ -17,7 +17,7 @@ class AudioTests(unittest.TestCase):
 
     def test_voice_limits(self):
         valid = dict(file_id="test_id", duration=30, file_size=4096, mime_type="audio/ogg")
-        self.assertEqual(select_voice(valid), valid)
+        self.assertEqual(select_voice(valid), {k: valid[k] for k in ("file_id", "duration", "file_size")})
         for change in (dict(duration=121), dict(file_size=9*1024*1024),
                        dict(mime_type="audio/mp3"), dict(file_id="../../x")):
             self.assertIsNone(select_voice(dict(valid, **change)))
