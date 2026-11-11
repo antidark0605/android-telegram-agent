@@ -16,6 +16,8 @@ BOT_COMMANDS: tuple[tuple[str, str], ...] = (
     ("context", "Show last task token accounting"),
     ("quota", "Show AGY usage limits when available"),
     ("usage", "Alias for /quota"),
+    ("tts", "Speak or toggle per-topic TTS mode"),
+    ("audio", "Inspect or stop device audio"),
 )
 
 # These category scopes override the default menu when populated. This bot has

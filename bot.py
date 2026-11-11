@@ -14,6 +14,9 @@ from pathlib import Path
 from access import TelegramAccess, identity_reply
 from incoming_media import download_media, select_document, select_photo
 from incoming_photo import download_photo
+from voice_handler import select_voice
+from audio_service import AudioService
+from audio_commands import parse_tts
 from agy import AgyRunner, list_models
 from ask_bridge import AskBridge
 from config import ConfigError, Settings, load_settings
@@ -121,6 +124,7 @@ class TelegramAgyBot:
         self._started_at = datetime.now(timezone.utc)
         self._lifecycle_attempted: set[tuple[int, int]] = set()
         self.quota = QuotaService(settings.agy_command, settings.workspace)
+        self.audio = AudioService(api, settings.config_path.parent)
 
     def _sync_command_menu(self) -> None:
         """Make Telegram's server-side menu match the implemented routes."""
@@ -307,6 +311,7 @@ class TelegramAgyBot:
         if type(thread) is not int:
             thread = None
         attachment_present = any(field in message for field in ATTACHMENT_FIELDS)
+        voice = select_voice(message.get("voice"))
         photo = select_photo(message.get("photo"))
         document = None if photo else select_document(message.get("document"))
         incoming = photo or document
@@ -337,6 +342,15 @@ class TelegramAgyBot:
             return  # Nothing, including AGY/Ask/commands, for unlisted pairs.
         self.events.log("inbound_authorized", kind="message")
         self._record_destination(user, chat_id, thread)
+        if voice is not None:
+            if self.audio.submit("voice", voice,
+                    lambda ok: self._send(chat_id,
+                        "Voice playback finished." if ok else "Voice playback failed.",
+                        thread)):
+                self._send(chat_id, "Voice queued for RTX.", thread)
+            else:
+                self._send(chat_id, "Audio queue full.", thread)
+            return
         if attachment_present and incoming is None:
             self._send(chat_id, "Unsupported attachment. Send one supported photo or document "
                        "within the allowed file type and size limits.", thread)
@@ -354,6 +368,34 @@ class TelegramAgyBot:
                 and active.thread == thread and not text.startswith("/")):
             self._answer_question(key, pending, text[:3000])
             return
+        if cmd == "/audio":
+            action = arg.strip().lower()
+            if action == "status":
+                self._send(chat_id, self.audio.status(), thread)
+            elif action == "stop":
+                self.audio.stop()
+                self._send(chat_id, "Audio queue cleared; current TTS may finish.", thread)
+            else:
+                self._send(chat_id, "Use /audio status or /audio stop.", thread)
+            return
+        if cmd == "/tts":
+            action, value = parse_tts(arg)
+            if action == "invalid":
+                self._send(chat_id, "TTS exceeds 500 characters or is invalid.", thread)
+            elif action == "status":
+                self._send(chat_id, "TTS mode: " +
+                           ("on" if self.sessions.get(key).get("tts_enabled") is True
+                            else "off"), thread)
+            elif action in ("on", "off"):
+                try:
+                    self.sessions.change(key, tts_enabled=(action == "on"))
+                except (OSError, ValueError):
+                    self._send(chat_id, "TTS mode could not be saved.", thread)
+                else:
+                    self._send(chat_id, "TTS mode: " + action, thread)
+            else:
+                self._speak(chat_id, thread, value)
+            return
         if cmd in ("/start", "/help"):
             self._send(chat_id, "AGY Telegram Agent\n"
                        "Text: continue an activated topic conversation\n"
@@ -365,7 +407,9 @@ class TelegramAgyBot:
                        "/last: manually resend the last saved reply\n"
                        "/ls [PATH]: list any directory accessible to the Bot user (ls -l)\n"
                        "/status, /context, /quota: show status\n"
-                       "Tap 🛑 中斷 (Stop) to interrupt running tasks.\n"
+                       "/tts [text|off|status]: speak or enable TTS mode\\n"
+                       "/audio [status|stop]: device audio commands\\n"
+                       "Tap 🛑 中斷 (Stop) to interrupt running tasks.\\n"
                        "No collaboration or kanban.", thread)
         elif cmd == "/status":
             row = self.sessions.get(key)
@@ -488,10 +532,23 @@ class TelegramAgyBot:
                                  daemon=True, name="agy-quota").start()
         elif text.startswith("/") and incoming is None:
             self._send(chat_id, "Unknown command. Try /help.", thread)
+        elif incoming is None and self.sessions.get(key).get("tts_enabled") is True:
+            if len(text) > 500:
+                self._send(chat_id, "TTS exceeds 500 characters.", thread)
+            else:
+                self._speak(chat_id, thread, text)
         elif len(text) > 4000:
             self._send(chat_id, "Prompt exceeds 4000 characters.", thread)
         else:
             self._start_task(text, user, chat_id, thread, key, photo=incoming)
+
+    def _speak(self, chat: int, thread: int | None, text: str) -> None:
+        if self.audio.submit("tts", text,
+                lambda ok: self._send(chat,
+                    "TTS sent to Android." if ok else "TTS failed.", thread)):
+            self._send(chat, "TTS queued for RTX.", thread)
+        else:
+            self._send(chat, "Audio queue full.", thread)
 
     def _list_workspace(self, chat: int, thread: int | None, workspace: Path) -> None:
         try:
