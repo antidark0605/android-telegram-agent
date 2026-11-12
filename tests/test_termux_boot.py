@@ -8,7 +8,7 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 SCRIPT = Path(__file__).resolve().parent.parent / 'scripts/setup-termux-boot.py'
 spec = importlib.util.spec_from_file_location('setup_termux_boot', SCRIPT)
@@ -133,7 +133,7 @@ class BootSetupTests(unittest.TestCase):
         self.assertFalse((boot_dir / boot.SCRIPT_NAME).exists())
 
     def test_staging_never_appears_in_boot_consumer_directory(self):
-        real_link = os.link
+        real_publish = boot._publish_no_replace
         observed = []
 
         def publish(source, target):
@@ -142,9 +142,9 @@ class BootSetupTests(unittest.TestCase):
             self.assertEqual(source.parent, self.home / '.termux')
             self.assertEqual(source.read_text(), boot.BOOT_SCRIPT)
             self.assertEqual(list(target.parent.iterdir()), [])
-            return real_link(source, target)
+            return real_publish(source, target)
 
-        with patch.object(boot.os, 'link', side_effect=publish):
+        with patch.object(boot, '_publish_no_replace', side_effect=publish):
             status = boot.install(self.home, self.prefix, installed=True)
         self.assertTrue(all(status.values()))
         self.assertEqual(len(observed), 1)
@@ -155,7 +155,7 @@ class BootSetupTests(unittest.TestCase):
     def test_cli_filesystem_errors_never_print_private_paths(self):
         # Exercise the actual installation failure sites, not only a stubbed
         # install() exception. Each stage must reach the same safe CLI boundary.
-        for stage in ('mkstemp', 'link', 'unlink', 'iterdir', 'mkdir'):
+        for stage in ('mkstemp', '_publish_no_replace', 'unlink', 'iterdir', 'mkdir'):
             with self.subTest(stage=stage), tempfile.TemporaryDirectory() as tmp:
                 home = Path(tmp) / 'home'
                 home.mkdir(mode=0o700)
@@ -166,7 +166,7 @@ class BootSetupTests(unittest.TestCase):
                     boot_dir.mkdir(mode=0o700)
                 error = PermissionError(errno.EACCES, 'Permission denied',
                                         '/synthetic/private-location/boot')
-                target = {'mkstemp': boot.tempfile, 'link': boot.os,
+                target = {'mkstemp': boot.tempfile, '_publish_no_replace': boot,
                           'unlink': boot.os, 'iterdir': boot.Path,
                           'mkdir': boot.Path}[stage]
                 output = io.StringIO()
@@ -191,6 +191,136 @@ class BootSetupTests(unittest.TestCase):
                     self.assertTrue(all(boot.install(
                         home, self.prefix, installed=True).values()))
                     self.assertEqual(hook.stat().st_ino, inode)
+
+    def test_real_install_without_os_link_is_private_idempotent_and_clean(self):
+        original = getattr(os, 'link', None)
+        if hasattr(os, 'link'):
+            del os.link
+        try:
+            status = boot.install(self.home, self.prefix, installed=True)
+            self.assertTrue(all(status.values()))
+            target = self.home / '.termux/boot' / boot.SCRIPT_NAME
+            self.assertEqual(target.read_text(), boot.BOOT_SCRIPT)
+            self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o700)
+            inode = target.stat().st_ino
+            self.assertTrue(all(boot.install(self.home, self.prefix, installed=True).values()))
+            self.assertEqual(target.stat().st_ino, inode)
+            self.assertEqual(list((self.home / '.termux').iterdir()), [target.parent])
+        finally:
+            if original is not None:
+                os.link = original
+
+    def test_rename_never_replaces_existing_file_or_symlink(self):
+        for kind in ('file', 'symlink', 'dangling-symlink'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                base = Path(tmp)
+                source, target = base / 'source', base / 'target'
+                source.write_text('new hook')
+                if kind == 'file':
+                    target.write_text('existing hook')
+                else:
+                    referent = base / 'referent'
+                    if kind == 'symlink':
+                        referent.write_text('existing hook')
+                    target.symlink_to(referent)
+                inode = target.lstat().st_ino
+                with patch.object(boot.os, 'link', None, create=True):
+                    with self.assertRaises(FileExistsError):
+                        boot._publish_no_replace(str(source), target)
+                self.assertEqual(target.lstat().st_ino, inode)
+                self.assertEqual(source.read_text(), 'new hook')
+                if kind != 'dangling-symlink':
+                    self.assertEqual(target.read_text(), 'existing hook')
+
+    def test_concurrent_hook_is_not_overwritten_and_staging_is_removed(self):
+        real_publish = boot._publish_no_replace
+
+        def race(source, target):
+            target.write_text('concurrent hook')
+            return real_publish(source, target)
+
+        with (patch.object(boot.os, 'link', None, create=True),
+              patch.object(boot, '_publish_no_replace', side_effect=race)):
+            with self.assertRaisesRegex(boot.SetupError, 'concurrently'):
+                boot.install(self.home, self.prefix, installed=True)
+        target = self.home / '.termux/boot' / boot.SCRIPT_NAME
+        self.assertEqual(target.read_text(), 'concurrent hook')
+        self.assertEqual(list((self.home / '.termux').iterdir()), [target.parent])
+
+    def test_missing_libc_symbol_fails_closed_and_cleans_staging(self):
+        import ctypes
+        with (patch.object(boot.os, 'link', None, create=True),
+              patch.object(ctypes, 'CDLL', return_value=object())):
+            with self.assertRaisesRegex(boot.SetupError, 'unavailable'):
+                boot.install(self.home, self.prefix, installed=True)
+        self.assertEqual(list((self.home / '.termux').iterdir()),
+                         [self.home / '.termux/boot'])
+        self.assertEqual(list((self.home / '.termux/boot').iterdir()), [])
+
+    def test_rename_errno_and_abi_are_checked_without_unsafe_fallback(self):
+        import ctypes
+        for code in (errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP,
+                     errno.EACCES, errno.EXDEV):
+            with self.subTest(code=code):
+                rename = Mock(return_value=-1)
+                library = Mock(renameat2=rename)
+                expected = (boot.SetupError if code in (
+                    errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP) else OSError)
+                with (patch.object(boot.os, 'link', None, create=True),
+                      patch.object(ctypes, 'CDLL', return_value=library) as load,
+                      patch.object(ctypes, 'get_errno', return_value=code),
+                      patch.object(boot.os, 'rename', side_effect=AssertionError('unsafe')),
+                      patch.object(boot.os, 'replace', side_effect=AssertionError('unsafe'))):
+                    with self.assertRaises(expected):
+                        boot._publish_no_replace('source', Path('target'))
+                load.assert_called_once_with(None, use_errno=True)
+                rename.assert_called_once_with(-100, b'source', -100, b'target', 1)
+                self.assertEqual(rename.argtypes, (ctypes.c_int, ctypes.c_char_p,
+                                 ctypes.c_int, ctypes.c_char_p, ctypes.c_uint))
+                self.assertIs(rename.restype, ctypes.c_int)
+
+    def test_old_arm64_libc_syscall_uses_verified_abi_and_errno(self):
+        import ctypes
+        for code in (0, errno.EEXIST, errno.ENOSYS, errno.EACCES):
+            with self.subTest(code=code):
+                syscall = Mock(return_value=-1 if code else 0)
+                library = Mock(renameat2=None, syscall=syscall)
+                with (patch.object(boot.os, 'link', None, create=True),
+                      patch.object(ctypes, 'CDLL', return_value=library),
+                      patch.object(boot.sys, 'platform', 'linux'),
+                      patch.object(boot.os, 'uname', return_value=Mock(machine='aarch64')),
+                      patch.object(ctypes, 'sizeof', return_value=8),
+                      patch.object(ctypes, 'get_errno', return_value=code)):
+                    if code:
+                        expected = boot.SetupError if code == errno.ENOSYS else OSError
+                        with self.assertRaises(expected) as failure:
+                            boot._publish_no_replace('source', Path('target'))
+                        if code == errno.EEXIST:
+                            self.assertIsInstance(failure.exception, FileExistsError)
+                    else:
+                        boot._publish_no_replace('source', Path('target'))
+                syscall.assert_called_once_with(276, -100, b'source', -100, b'target', 1)
+                self.assertEqual(syscall.argtypes, (ctypes.c_long, ctypes.c_int,
+                                 ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p,
+                                 ctypes.c_uint))
+                self.assertIs(syscall.restype, ctypes.c_long)
+
+    def test_unknown_syscall_abi_is_rejected_without_calling_syscall(self):
+        import ctypes
+        for platform, machine, bits in (('linux', 'unknown', 8),
+                                        ('linux', 'aarch64', 4),
+                                        ('darwin', 'aarch64', 8)):
+            with self.subTest(platform=platform, machine=machine, bits=bits):
+                syscall = Mock(side_effect=AssertionError('unknown ABI'))
+                library = Mock(renameat2=None, syscall=syscall)
+                with (patch.object(boot.os, 'link', None, create=True),
+                      patch.object(ctypes, 'CDLL', return_value=library),
+                      patch.object(boot.sys, 'platform', platform),
+                      patch.object(boot.os, 'uname', return_value=Mock(machine=machine)),
+                      patch.object(ctypes, 'sizeof', return_value=bits)):
+                    with self.assertRaisesRegex(boot.SetupError, 'unavailable'):
+                        boot._publish_no_replace('source', Path('target'))
+                syscall.assert_not_called()
 
     def test_read_only_check_does_not_create_dirs(self):
         with patch.object(boot.os, 'getuid', return_value=os.getuid()):

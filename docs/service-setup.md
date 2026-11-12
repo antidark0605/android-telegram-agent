@@ -1,6 +1,6 @@
 # Termux 版本化部署與常駐服務
 
-Revision: 4 — 2026-11-09
+Revision: 5 — 2026-11-11
 
 本文件適用於非 root Termux。私人 config、Token、AGY 登入資料與 workspace
 不得放入 Git checkout 或 release 目錄。先依
@@ -153,11 +153,29 @@ Symbolic Link、不安全目錄權限，或偵測到另一份 Bot／service 啟�
 檢查包含隱藏開機腳本。安裝暫存檔放在 boot 目錄外，避免中斷後留下另一份可執行腳本。
 檔案系統錯誤只輸出固定訊息，不包含私人路徑。
 
+Termux 官方 Python 建置停用 `link`／`linkat`，因此不能假設 `os.link` 存在。
+工具在此情況下使用標準函式庫 `ctypes` 呼叫 libc 的
+`renameat2(RENAME_NOREPLACE)`；它以原子操作發布完整腳本，且拒絕覆寫已存在的
+檔案或 symlink。Android API 30 前的 ARM64 libc 沒有此包裝函式時，使用已核對的
+Linux ARM64 系統呼叫 ABI；其他未知 ABI 不猜測系統呼叫編號。
+缺少 `ctypes`、必要 libc symbol、核心或檔案系統支援時，工具安全失敗；
+不退回會覆寫檔案的 `rename`／`replace`。暫存名稱被 rename 消耗後仍能正常清理。
+此相容性處理不會啟用開機啟動，仍須完成上述 App 與腳本設定。
+
+來源：[Termux Python build](https://github.com/termux/termux-packages/blob/master/packages/python/build.sh)、
+[renameat2](https://man7.org/linux/man-pages/man2/rename.2.html)、
+[Android libc declaration](https://github.com/aosp-mirror/platform_bionic/blob/master/libc/include/stdio.h)、
+[ARM64 syscall numbers](https://github.com/aosp-mirror/platform_bionic/blob/master/libc/kernel/uapi/asm-arm64/asm/unistd_64.h)。
+
 `--check` 只代表**靜態前提與腳本就緒**，無法確認 App 曾被手動開啟、Android
 是否交付 `BOOT_COMPLETED`、是否有電池背景限制，也不代表真正 reboot 已驗證。
 目前程式不預設取得 wake lock，以免增加耗電。
 
 **Local Agent 實機驗收（結果保存在私人紀錄）：**
+
+更新開機安裝工具時，先在目標非 root Termux 的隔離目錄執行完整測試及版本化
+installer，核對 release marker 與 `current` 消費端。隔離測試不得建立真實 boot hook
+或切換生產 release。桌面／Ubuntu CI 通過不代表 Android 安裝相容性通過。
 
 1. 開機前記錄目前 service、單一 Bot PID、release marker 與啟動設定；只有明確
    授權且沒有執行中任務時才執行 reboot。
